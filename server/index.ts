@@ -79,6 +79,11 @@ function expandHome(path: string): string {
   return path
 }
 
+/** Normalize a path for comparison: expand ~, resolve, strip trailing slash */
+function normalizePath(p: string): string {
+  return resolve(expandHome(p)).replace(/\/+$/, '')
+}
+
 const PORT = parseInt(process.env.VIBECRAFT_PORT ?? String(DEFAULTS.SERVER_PORT), 10)
 const EVENTS_FILE = resolve(expandHome(process.env.VIBECRAFT_EVENTS_FILE ?? DEFAULTS.EVENTS_FILE))
 const PENDING_PROMPT_FILE = resolve(expandHome(process.env.VIBECRAFT_PROMPT_FILE ?? '~/.vibecraft/data/pending-prompt.txt'))
@@ -1297,6 +1302,22 @@ function addEvent(event: ClaudeEvent) {
   // Trim old events if over limit
   if (events.length > MAX_EVENTS) {
     events.splice(0, events.length - MAX_EVENTS)
+  }
+
+  // Auto-link unlinked Claude sessions by matching cwd
+  if (!claudeToManagedMap.has(event.sessionId) && event.cwd) {
+    const normalizedCwd = normalizePath(event.cwd)
+    for (const [id, managed] of managedSessions) {
+      if (managed.claudeSessionId) continue
+      if (managed.cwd && normalizePath(managed.cwd) === normalizedCwd) {
+        debug(`Auto-linking Claude session ${event.sessionId.slice(0, 8)} to "${managed.name}" by cwd match: ${event.cwd}`)
+        linkClaudeSession(event.sessionId, id)
+        managed.claudeSessionId = event.sessionId
+        broadcastSessions()
+        saveSessions()
+        break
+      }
+    }
   }
 
   // Update managed session status based on event

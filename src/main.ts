@@ -1343,7 +1343,7 @@ function setupDevPanel(): void {
 /** Map Claude sessionIds to managed session IDs */
 const claudeToManagedLink = new Map<string, string>()
 
-function getOrCreateSession(sessionId: string): SessionState | null {
+function getOrCreateSession(sessionId: string, eventCwd?: string): SessionState | null {
   let session = state.sessions.get(sessionId)
   if (session) return session
 
@@ -1353,7 +1353,7 @@ function getOrCreateSession(sessionId: string): SessionState | null {
 
   // Check if this session can be linked to a managed session
   // Only create zones for sessions that are linked or can be linked
-  const canLink = canLinkToManagedSession(sessionId)
+  const canLink = canLinkToManagedSession(sessionId, eventCwd)
   if (!canLink) {
     // Unlinked session - don't create a zone for it
     console.log(`Ignoring unlinked session ${sessionId.slice(0, 8)} (no matching managed session)`)
@@ -1362,7 +1362,7 @@ function getOrCreateSession(sessionId: string): SessionState | null {
 
   // Try to link to a recently-created managed session FIRST
   // (so we can get the hint position from it)
-  const linkedManagedSession = tryLinkToManagedSession(sessionId)
+  const linkedManagedSession = tryLinkToManagedSession(sessionId, eventCwd)
 
   // Look up hint position: first check saved zone position, then pending hints
   let hintPosition: { x: number; z: number } | undefined
@@ -1464,7 +1464,7 @@ function getOrCreateSession(sessionId: string): SessionState | null {
  * Check if a Claude session can be linked to a managed session
  * Returns true if already linked or if there's a recently-created unlinked managed session
  */
-function canLinkToManagedSession(claudeSessionId: string): boolean {
+function canLinkToManagedSession(claudeSessionId: string, eventCwd?: string): boolean {
   // Already linked?
   if (claudeToManagedLink.has(claudeSessionId)) {
     return true
@@ -1477,7 +1477,19 @@ function canLinkToManagedSession(claudeSessionId: string): boolean {
     }
   }
 
-  // Is there a recently-created unlinked managed session we can link to?
+  // Can we match by working directory? (precise, no timing dependency)
+  if (eventCwd) {
+    const normalizedCwd = eventCwd.replace(/\/+$/, '')
+    for (const managed of state.managedSessions) {
+      if (!managed.claudeSessionId && managed.cwd) {
+        if (managed.cwd.replace(/\/+$/, '') === normalizedCwd) {
+          return true
+        }
+      }
+    }
+  }
+
+  // Fallback: Is there a recently-created unlinked managed session we can link to?
   const now = Date.now()
   const LINK_WINDOW_MS = 30_000 // 30 seconds
   for (const managed of state.managedSessions) {
@@ -1496,31 +1508,39 @@ function canLinkToManagedSession(claudeSessionId: string): boolean {
  * Try to link a Claude session to a managed session
  * Uses timing: looks for unlinked managed sessions created in the last 30 seconds
  */
-function tryLinkToManagedSession(claudeSessionId: string): ManagedSession | null {
-  const now = Date.now()
-  const LINK_WINDOW_MS = 30_000 // 30 seconds
-
+function tryLinkToManagedSession(claudeSessionId: string, eventCwd?: string): ManagedSession | null {
   // Check if already linked
   if (claudeToManagedLink.has(claudeSessionId)) {
     const managedId = claudeToManagedLink.get(claudeSessionId)!
     return state.managedSessions.find(s => s.id === managedId) || null
   }
 
-  // Find unlinked managed sessions created recently
-  for (const managed of state.managedSessions) {
-    // Skip if already linked
-    if (managed.claudeSessionId) continue
+  // Priority 1: Match by working directory (precise)
+  if (eventCwd) {
+    const normalizedCwd = eventCwd.replace(/\/+$/, '')
+    for (const managed of state.managedSessions) {
+      if (managed.claudeSessionId) continue
+      if (managed.cwd && managed.cwd.replace(/\/+$/, '') === normalizedCwd) {
+        claudeToManagedLink.set(claudeSessionId, managed.id)
+        managed.claudeSessionId = claudeSessionId
+        linkSessionOnServer(managed.id, claudeSessionId)
+        console.log(`Linked session ${claudeSessionId.slice(0, 8)} to "${managed.name}" by cwd match: ${eventCwd}`)
+        return managed
+      }
+    }
+  }
 
-    // Check if created recently
+  // Priority 2: Timing-based fallback (only if cwd matching failed)
+  const now = Date.now()
+  const LINK_WINDOW_MS = 30_000
+  for (const managed of state.managedSessions) {
+    if (managed.claudeSessionId) continue
     const age = now - managed.createdAt
     if (age < LINK_WINDOW_MS) {
-      // Link them!
       claudeToManagedLink.set(claudeSessionId, managed.id)
       managed.claudeSessionId = claudeSessionId
-
-      // Notify server about the link
       linkSessionOnServer(managed.id, claudeSessionId)
-
+      console.log(`Linked session ${claudeSessionId.slice(0, 8)} to "${managed.name}" by timing fallback`)
       return managed
     }
   }
@@ -1748,7 +1768,7 @@ function updateStats() {
 function handleEvent(event: ClaudeEvent) {
   // Get or create session for this event
   // Returns null if the session isn't linked to a managed session
-  const session = getOrCreateSession(event.sessionId)
+  const session = getOrCreateSession(event.sessionId, event.cwd)
 
   state.eventHistory.push(event)
 
