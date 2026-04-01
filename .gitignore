@@ -36,3 +36,9 @@ npm-debug.log*
 bin/vibecraft
 scripts/test-*.sh
 todo.txt
+
+# Analysis docs (generated)
+*.DECISION.md
+COMPETITIVE_LANDSCAPE.md
+RISK_ANALYSIS.md
+COMMERCIALIZATION_DECISION.md
