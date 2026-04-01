@@ -1,6 +1,6 @@
 {
   "name": "@alexso1212/vibecraft",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "3D visualization of Claude Code as an interactive workshop",
   "author": "nearcyan",
   "license": "MIT",
@@ -46,7 +46,7 @@
     "@deepgram/sdk": "^4.11.3",
     "@xterm/addon-fit": "^0.11.0",
     "chokidar": "^4.0.0",
-    "node-pty": "^1.1.0",
+    "node-pty": "^1.2.0-beta.12",
     "three": "^0.170.0",
     "tone": "^15.1.22",
     "ws": "^8.18.0",
