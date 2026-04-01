@@ -154,6 +154,57 @@
   font-family: monospace;
 }
 
+.modal-field .field-hint strong {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* Directory input with browse button */
+.dir-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.dir-input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.browse-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  flex-shrink: 0;
+  background: rgba(167, 139, 250, 0.15);
+  border: 1px solid rgba(167, 139, 250, 0.3);
+  border-radius: 8px;
+  color: #c4b5fd;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.browse-btn:hover {
+  background: rgba(167, 139, 250, 0.3);
+  border-color: rgba(167, 139, 250, 0.5);
+  color: #e4d4ff;
+}
+
+.browse-btn:active {
+  transform: scale(0.95);
+}
+
+.browse-btn.picking {
+  opacity: 0.6;
+  cursor: wait;
+  animation: browse-pulse 1s ease-in-out infinite;
+}
+
+@keyframes browse-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
 .modal-actions {
   display: flex;
   gap: 10px;

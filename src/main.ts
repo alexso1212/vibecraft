@@ -55,9 +55,13 @@ import {
   hidePermissionModal,
 } from './ui/PermissionModal'
 import { setupSlashCommands, isSlashCommand } from './ui/SlashCommands'
-import { setupDirectoryAutocomplete } from './ui/DirectoryAutocomplete'
+import { setupDirectoryAutocomplete, setupBrowseButton } from './ui/DirectoryAutocomplete'
 import { checkForUpdates } from './ui/VersionChecker'
 import { drawMode } from './ui/DrawMode'
+import { modeManager, type SkillMode } from './effects/ModeManager'
+import { ECCEffect } from './effects/ECCEffect'
+import { SuperpowerEffect } from './effects/SuperpowerEffect'
+import { OctopusEffect } from './effects/OctopusEffect'
 import { setupTextLabelModal, showTextLabelModal } from './ui/TextLabelModal'
 import { createSessionAPI, type SessionAPI } from './api'
 import { TerminalView } from './ui/TerminalView'
@@ -101,6 +105,12 @@ const sessionAPI = createSessionAPI(API_URL)
 // ============================================================================
 
 /** Per-session state */
+interface ModeEffects {
+  ecc: ECCEffect
+  superpower: SuperpowerEffect
+  octopus: OctopusEffect
+}
+
 interface SessionState {
   claude: Claude
   subagents: SubagentManager
@@ -111,6 +121,7 @@ interface SessionState {
     filesTouched: Set<string>
     activeSubagents: number
   }
+  modeEffects: ModeEffects
 }
 
 interface AppState {
@@ -610,6 +621,12 @@ function setupManagedSessions(): void {
   // Setup directory autocomplete
   if (cwdInput) {
     setupDirectoryAutocomplete(cwdInput)
+  }
+
+  // Setup native OS browse button
+  const browseBtn = document.getElementById('session-browse-btn')
+  if (browseBtn && cwdInput) {
+    setupBrowseButton(browseBtn, cwdInput)
   }
 
   // Auto-populate name from directory when cwd changes
@@ -1348,9 +1365,91 @@ function setupDevPanel(): void {
       }
     })
     animationsContainer.appendChild(stopBtn)
+
+    // --- Mode Effects Section ---
+    const modeHeader = document.createElement('div')
+    modeHeader.className = 'dev-section-header'
+    modeHeader.textContent = 'Modes'
+    animationsContainer.appendChild(modeHeader)
+
+    const modes: { label: string; mode: SkillMode }[] = [
+      { label: '影分身 ECC', mode: 'ecc' },
+      { label: '川普 Superpower', mode: 'superpower' },
+      { label: '触手 Octopus', mode: 'octopus' },
+    ]
+
+    for (const { label, mode } of modes) {
+      const btn = document.createElement('button')
+      btn.className = 'dev-anim-btn'
+      btn.textContent = label
+      btn.addEventListener('click', () => {
+        if (!state.focusedSessionId) return
+        const current = modeManager.getMode(state.focusedSessionId)
+        if (current === mode) {
+          // Toggle off
+          modeManager.deactivate(state.focusedSessionId, mode, 0)
+          btn.classList.remove('playing')
+        } else {
+          // Activate (force by deactivating current first)
+          if (current !== 'none') {
+            modeManager.deactivate(state.focusedSessionId, current, 0)
+          }
+          modeManager.activate(state.focusedSessionId, mode)
+          document.querySelectorAll('.dev-mode-btn').forEach(b => b.classList.remove('playing'))
+          btn.classList.add('playing')
+        }
+      })
+      btn.classList.add('dev-mode-btn')
+      animationsContainer.appendChild(btn)
+    }
+
+    // Mode off button
+    const modeOffBtn = document.createElement('button')
+    modeOffBtn.className = 'dev-anim-btn dev-anim-btn-stop dev-mode-btn'
+    modeOffBtn.textContent = '⏹ Mode Off'
+    modeOffBtn.addEventListener('click', () => {
+      if (!state.focusedSessionId) return
+      modeManager.deactivate(state.focusedSessionId, undefined, 0)
+      document.querySelectorAll('.dev-mode-btn').forEach(b => b.classList.remove('playing'))
+    })
+    animationsContainer.appendChild(modeOffBtn)
   }
 
   checkForSession()
+}
+
+// ============================================================================
+// FX Mode Panel (quick mode toggle buttons)
+// ============================================================================
+
+function setupFxPanel(): void {
+  const buttons = document.querySelectorAll<HTMLButtonElement>('.fx-btn')
+  if (!buttons.length) return
+
+  // Sync button active state when mode changes
+  modeManager.onChange((zoneId, newMode) => {
+    if (zoneId !== state.focusedSessionId) return
+    buttons.forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.mode === newMode)
+    })
+  })
+
+  buttons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!state.focusedSessionId) return
+      const mode = btn.dataset.mode as SkillMode
+      const current = modeManager.getMode(state.focusedSessionId)
+
+      if (current === mode) {
+        modeManager.deactivate(state.focusedSessionId, mode, 0)
+      } else {
+        if (current !== 'none') {
+          modeManager.deactivate(state.focusedSessionId, current, 0)
+        }
+        modeManager.activate(state.focusedSessionId, mode)
+      }
+    })
+  })
 }
 
 // ============================================================================
@@ -1466,6 +1565,11 @@ function getOrCreateSession(sessionId: string, eventCwd?: string): SessionState 
       toolsUsed: 0,
       filesTouched: new Set(),
       activeSubagents: 0,
+    },
+    modeEffects: {
+      ecc: new ECCEffect(state.scene),
+      superpower: new SuperpowerEffect(state.scene),
+      octopus: new OctopusEffect(state.scene),
     },
   }
 
@@ -2695,6 +2799,42 @@ function init() {
   // Register EventBus handlers (decoupled event handling)
   registerAllHandlers()
 
+  // Wire up mode effect system
+  modeManager.onChange((zoneId, newMode, oldMode) => {
+    const session = state.sessions.get(zoneId)
+    if (!session) return
+
+    const { ecc, superpower, octopus } = session.modeEffects
+
+    // Deactivate old mode effect
+    if (oldMode !== 'none') {
+      if (oldMode === 'ecc') ecc.deactivate()
+      else if (oldMode === 'superpower') superpower.deactivate()
+      else if (oldMode === 'octopus') octopus.deactivate()
+
+      if (state.soundEnabled) {
+        const deactivateSound = `${oldMode}_deactivate` as `${typeof oldMode}_deactivate`
+        soundManager.play(deactivateSound, { zoneId })
+      }
+    }
+
+    // Activate new mode effect
+    if (newMode !== 'none') {
+      if (newMode === 'ecc') {
+        ecc.activate(zoneId, session.claude)
+      } else if (newMode === 'superpower') {
+        superpower.activate(zoneId, session.claude)
+      } else if (newMode === 'octopus') {
+        octopus.activate(zoneId, session.claude, session.subagents)
+      }
+
+      if (state.soundEnabled) {
+        const activateSound = `${newMode}_activate` as `${typeof newMode}_activate`
+        soundManager.play(activateSound, { zoneId })
+      }
+    }
+  })
+
   // Connect to event server
   state.client = new EventClient({
     url: WS_URL,
@@ -2806,6 +2946,11 @@ function init() {
               filesTouched: new Set(),
               activeSubagents: 0,
             },
+            modeEffects: {
+              ecc: new ECCEffect(state.scene),
+              superpower: new SuperpowerEffect(state.scene),
+              octopus: new OctopusEffect(state.scene),
+            },
           }
           state.sessions.set(session.claudeSessionId, sessionState)
 
@@ -2842,6 +2987,10 @@ function init() {
         // Clean up session state (Claude entity, subagents)
         const sessionState = state.sessions.get(zoneId)
         if (sessionState) {
+          // Dispose mode effects
+          sessionState.modeEffects.ecc.dispose()
+          sessionState.modeEffects.superpower.dispose()
+          sessionState.modeEffects.octopus.dispose()
           sessionState.claude.dispose()
           state.sessions.delete(zoneId)
         }
@@ -3000,6 +3149,9 @@ function init() {
 
   // Setup dev panel (animation testing, Alt+D to toggle)
   setupDevPanel()
+
+  // Setup FX mode buttons (bottom-right quick toggles)
+  setupFxPanel()
 
   // Setup question modal (for AskUserQuestion)
   setupQuestionModal({

@@ -13,7 +13,7 @@ import { createServer, IncomingMessage, ServerResponse } from 'http'
 import { WebSocketServer, WebSocket, RawData } from 'ws'
 import { watch } from 'chokidar'
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, unlinkSync, statSync } from 'fs'
-import { exec, execFile } from 'child_process'
+import { exec, execFile, execSync } from 'child_process'
 import { dirname, resolve, join, extname } from 'path'
 import { hostname } from 'os'
 import { randomUUID, randomBytes } from 'crypto'
@@ -140,6 +140,11 @@ function isOriginAllowed(origin: string | undefined): boolean {
 
     // Production: exact hostname match with HTTPS required
     if (url.hostname === 'vibecraft.sh' && url.protocol === 'https:') {
+      return true
+    }
+
+    // Vercel deployments (user's own hosted frontend)
+    if (url.hostname.endsWith('.vercel.app') && url.protocol === 'https:') {
       return true
     }
 
@@ -790,8 +795,8 @@ function createSession(options: CreateSessionRequest = {}): Promise<ManagedSessi
     const flags = options.flags || {}
     const claudeArgs: string[] = []
 
-    // Defaults: continue=true, skipPermissions=true, chrome=false
-    if (flags.continue !== false) {
+    // Defaults: continue=false (avoids crash when no prior conversation), skipPermissions=true, chrome=false
+    if (flags.continue === true) {
       claudeArgs.push('-c')
     }
     if (flags.skipPermissions !== false) {
@@ -821,10 +826,14 @@ function createSession(options: CreateSessionRequest = {}): Promise<ManagedSessi
         return
       }
 
-      // Disable alternate screen so TUI apps (Claude Code) keep output in main
-      // scrollback buffer, enabling terminal scroll in the browser
+      // Keep session alive if claude exits unexpectedly (shows error instead of vanishing)
       execFile('tmux', [
-        'set-option', '-t', tmuxSession, 'alternate-screen', 'off'
+        'set-option', '-t', tmuxSession, 'remain-on-exit', 'on'
+      ], EXEC_OPTIONS, () => {})
+
+      // Configure tmux scrollback buffer size
+      execFile('tmux', [
+        'set-option', '-t', tmuxSession, 'history-limit', '10000'
       ], EXEC_OPTIONS, () => {})
 
       const session: ManagedSession = {
@@ -1809,6 +1818,33 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse) {
     return
   }
 
+  // Open native OS file picker to choose a directory
+  if (req.method === 'GET' && req.url === '/choose-directory') {
+    if (process.platform !== 'darwin') {
+      res.writeHead(501, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, error: 'Native file picker only supported on macOS' }))
+      return
+    }
+
+    try {
+      const result = execSync(
+        `osascript -e 'POSIX path of (choose folder with prompt "Select project directory")'`,
+        { encoding: 'utf8', timeout: 120000 },
+      ).trim()
+
+      // Remove trailing slash
+      const path = result.replace(/\/+$/, '')
+
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, path }))
+    } catch {
+      // User cancelled the dialog or timeout
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, cancelled: true }))
+    }
+    return
+  }
+
   // Remove a project from the list
   if (req.method === 'DELETE' && req.url?.startsWith('/projects/')) {
     const path = decodeURIComponent(req.url.slice('/projects/'.length))
@@ -1989,19 +2025,24 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse) {
 
       // Kill existing tmux session if it exists (ignore errors)
       execFile('tmux', ['kill-session', '-t', session.tmuxSession], EXEC_OPTIONS, () => {
-        // Respawn tmux session with claude using execFile
+        // Respawn tmux session with claude using execFile (no -c flag to avoid crash on empty history)
         execFile('tmux', [
           'new-session',
           '-d',
           '-s', session.tmuxSession,
           '-c', cwd,
-          `PATH=${EXEC_PATH} claude -c --permission-mode=bypassPermissions --dangerously-skip-permissions`
+          `PATH=${EXEC_PATH} claude --permission-mode=bypassPermissions --dangerously-skip-permissions`
         ], EXEC_OPTIONS, (error) => {
           if (error) {
             res.writeHead(500, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ ok: false, error: `Failed to restart: ${error.message}` }))
             return
           }
+
+          // Keep session alive if claude exits unexpectedly
+          execFile('tmux', [
+            'set-option', '-t', session.tmuxSession, 'remain-on-exit', 'on'
+          ], EXEC_OPTIONS, () => {})
 
           // Update session state
           session.status = 'idle'

@@ -303,6 +303,39 @@ function shortenPath(path: string): string {
   return path.replace(/^\/(?:Users|home)\/[^/]+/, '~')
 }
 
+/**
+ * Setup the native OS directory picker (Browse button).
+ * Calls /choose-directory on the server which opens macOS Finder dialog.
+ */
+export function setupBrowseButton(
+  button: HTMLElement,
+  input: HTMLInputElement,
+  onSelect?: (path: string) => void,
+): void {
+  let picking = false
+
+  button.addEventListener('click', async () => {
+    if (picking) return
+    picking = true
+    button.classList.add('picking')
+
+    try {
+      const response = await fetch(`${API_URL}/choose-directory`)
+      const data = await response.json()
+      if (data.ok && data.path) {
+        input.value = data.path
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        onSelect?.(data.path)
+      }
+    } catch {
+      // Server unreachable or error
+    } finally {
+      picking = false
+      button.classList.remove('picking')
+    }
+  })
+}
+
 /** Status dot for session items */
 function statusDot(status?: string): string {
   const colors: Record<string, string> = {

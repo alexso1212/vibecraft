@@ -1,99 +1,114 @@
 /**
- * FeedManager - Manages the activity feed panel
+ * FeedManager - Task Tracker Panel
  *
- * Handles:
- * - Adding events to the feed (prompts, tool uses, responses)
- * - Filtering by session
- * - Auto-scroll behavior
- * - Scroll-to-bottom button
+ * Transforms raw Claude events into a high-level task memory:
+ * - Each user_prompt_submit starts a new task
+ * - pre/post_tool_use accumulate as work within the current task
+ * - Task tool spawns sub-task branches
+ * - stop with response completes a task turn
+ *
+ * Helps humans remember what's happening across long terminal sessions.
  */
 
 import { getToolIcon } from '../utils/ToolUtils'
 import type { ClaudeEvent, PreToolUseEvent, PostToolUseEvent } from '../../shared/types'
 
+// ============================================================================
+// Task Model
+// ============================================================================
+
+interface TaskTool {
+  tool: string
+  toolUseId: string
+  file?: string
+  command?: string
+  success?: boolean
+  duration?: number
+}
+
+interface SubTask {
+  toolUseId: string
+  description: string
+  status: 'running' | 'done'
+}
+
+interface TaskSummary {
+  id: string
+  prompt: string
+  timestamp: number
+  sessionId: string
+  status: 'working' | 'done'
+  tools: TaskTool[]
+  subTasks: SubTask[]
+  response?: string
+  filesChanged: Set<string>
+  filesRead: Set<string>
+}
+
+// ============================================================================
+// FeedManager (TaskTracker)
+// ============================================================================
+
 export class FeedManager {
   private feedEl: HTMLElement | null = null
   private scrollBtn: HTMLElement | null = null
 
-  // State tracking
-  private eventIds = new Set<string>()
-  private pendingItems = new Map<string, HTMLElement>()
-  private completedData = new Map<string, { success: boolean; duration?: number; response?: Record<string, unknown> }>()
-  private activeFilter: string | null = null
+  // Task state
+  private tasks: TaskSummary[] = []
+  private taskElements = new Map<string, HTMLElement>()
+  private currentTaskId: string | null = null
 
-  // Working directory for shortening paths
-  private cwd: string = ''
+  // Dedup & filter
+  private eventIds = new Set<string>()
+  private activeFilter: string | null = null
+  private cwd = ''
 
   // Thinking indicator per session
   private thinkingIndicators = new Map<string, HTMLElement>()
 
-  // Track assistant text to avoid duplicates in parallel tool calls
+  // Track completed tool data that arrives before pre_tool_use
+  private completedData = new Map<string, { success: boolean; duration?: number }>()
+
+  // Dedup assistant text
   private lastAssistantText: string | null = null
   private lastAssistantTextTime = 0
-  private readonly ASSISTANT_TEXT_DEDUP_WINDOW = 2000  // ms
 
   constructor() {
     this.feedEl = document.getElementById('activity-feed')
     this.scrollBtn = document.getElementById('feed-scroll-bottom')
   }
 
-  /**
-   * Set the working directory for path shortening
-   */
   setCwd(cwd: string): void {
     this.cwd = cwd
   }
 
-  /**
-   * Shorten a file path by removing the working directory prefix
-   */
   private shortenPath(path: string): string {
     if (!this.cwd || !path) return path
-    // Normalize: remove trailing slash from cwd
     const cwdNorm = this.cwd.endsWith('/') ? this.cwd.slice(0, -1) : this.cwd
     if (path.startsWith(cwdNorm + '/')) {
-      return path.slice(cwdNorm.length + 1)  // +1 for the slash
+      return path.slice(cwdNorm.length + 1)
     }
-    return path
+    // Also shorten home directory
+    return path.replace(/^\/(?:Users|home)\/[^/]+/, '~')
   }
 
-  /**
-   * Setup scroll button behavior (call once during init)
-   */
   setupScrollButton(): void {
     if (!this.feedEl || !this.scrollBtn) return
-
-    // Update button visibility on scroll
     this.feedEl.addEventListener('scroll', () => this.updateScrollButton())
-
-    // Click to scroll to bottom
     this.scrollBtn.addEventListener('click', () => this.scrollToBottom())
   }
 
-  /**
-   * Filter feed items by session ID
-   */
   setFilter(sessionId: string | null): void {
     if (!this.feedEl) return
-
     this.activeFilter = sessionId
-
-    this.feedEl.querySelectorAll('.feed-item').forEach((item) => {
-      const itemEl = item as HTMLElement
-      const itemSession = itemEl.dataset.sessionId
-
-      // Show all if no filter, or show matching session
-      const shouldShow = sessionId === null || itemSession === sessionId
-      itemEl.style.display = shouldShow ? '' : 'none'
+    this.feedEl.querySelectorAll('.task-card').forEach((el) => {
+      const card = el as HTMLElement
+      const shouldShow = sessionId === null || card.dataset.sessionId === sessionId
+      card.style.display = shouldShow ? '' : 'none'
     })
-
-    // Auto-scroll to bottom when switching sessions
     this.scrollToBottom()
   }
 
-  /**
-   * Scroll feed to bottom (deferred to next frame for accurate scrollHeight)
-   */
   scrollToBottom(): void {
     requestAnimationFrame(() => {
       if (this.feedEl) {
@@ -102,39 +117,27 @@ export class FeedManager {
     })
   }
 
-  /**
-   * Check if feed is scrolled near the bottom
-   */
   isNearBottom(): boolean {
     if (!this.feedEl) return true
     const threshold = 100
     return this.feedEl.scrollHeight - this.feedEl.scrollTop - this.feedEl.clientHeight < threshold
   }
 
-  /**
-   * Update scroll button visibility
-   */
   private updateScrollButton(): void {
     if (!this.scrollBtn) return
     this.scrollBtn.classList.toggle('visible', !this.isNearBottom())
   }
 
-  /**
-   * Show a "thinking" indicator for a session
-   */
   showThinking(sessionId: string, sessionColor?: number): void {
     if (!this.feedEl) return
-
-    // Don't show duplicate thinking indicators
     if (this.thinkingIndicators.has(sessionId)) return
 
     this.removeEmptyState()
 
     const item = document.createElement('div')
-    item.className = 'feed-item thinking-indicator'
+    item.className = 'task-thinking'
     item.dataset.sessionId = sessionId
 
-    // Apply session color as left border
     if (sessionColor !== undefined) {
       item.style.borderLeftColor = `#${sessionColor.toString(16).padStart(6, '0')}`
       item.style.borderLeftWidth = '3px'
@@ -142,17 +145,15 @@ export class FeedManager {
     }
 
     item.innerHTML = `
-      <div class="feed-item-header">
-        <div class="feed-item-icon thinking-icon">🤔</div>
-        <div class="feed-item-title">Claude is thinking</div>
-        <div class="thinking-dots"><span>.</span><span>.</span><span>.</span></div>
+      <div class="task-thinking-inner">
+        <span class="thinking-dot-pulse"></span>
+        <span>Thinking...</span>
       </div>
     `
 
     this.thinkingIndicators.set(sessionId, item)
     this.feedEl.appendChild(item)
 
-    // Apply filter
     if (this.activeFilter !== null && sessionId !== this.activeFilter) {
       item.style.display = 'none'
     } else {
@@ -160,9 +161,6 @@ export class FeedManager {
     }
   }
 
-  /**
-   * Hide the thinking indicator for a session (or all sessions)
-   */
   hideThinking(sessionId?: string): void {
     if (sessionId) {
       const indicator = this.thinkingIndicators.get(sessionId)
@@ -171,7 +169,6 @@ export class FeedManager {
         this.thinkingIndicators.delete(sessionId)
       }
     } else {
-      // Remove all thinking indicators
       for (const indicator of this.thinkingIndicators.values()) {
         indicator.remove()
       }
@@ -179,339 +176,385 @@ export class FeedManager {
     }
   }
 
-  /**
-   * Remove the empty state placeholder
-   */
   private removeEmptyState(): void {
     const empty = document.getElementById('feed-empty')
-    if (empty) {
-      empty.remove()
-    }
+    if (empty) empty.remove()
   }
 
-  /**
-   * Add an event to the feed
-   */
+  // ============================================================================
+  // Core: Process events into task model
+  // ============================================================================
+
   add(event: ClaudeEvent, sessionColor?: number): void {
     if (!this.feedEl) return
-
-    // Skip duplicates
-    if (this.eventIds.has(event.id)) {
-      return
-    }
+    if (this.eventIds.has(event.id)) return
     this.eventIds.add(event.id)
 
     this.removeEmptyState()
 
-    const item = document.createElement('div')
-    item.className = 'feed-item'
-    item.dataset.eventId = event.id
-    item.dataset.sessionId = event.sessionId
-
-    // Apply session color as left border
-    if (sessionColor !== undefined) {
-      item.style.borderLeftColor = `#${sessionColor.toString(16).padStart(6, '0')}`
-      item.style.borderLeftWidth = '3px'
-      item.style.borderLeftStyle = 'solid'
-    }
-
     switch (event.type) {
-      case 'user_prompt_submit': {
-        const e = event as { prompt?: string; timestamp: number }
-        const promptText = e.prompt ?? ''
-
-        // Skip duplicate prompts
-        const lastPrompt = this.feedEl.querySelector('.feed-item.user-prompt:last-of-type') as HTMLElement | null
-        if (lastPrompt) {
-          const lastText = lastPrompt.querySelector('.prompt-text')?.textContent ?? ''
-          if (promptText === lastText) return
-        }
-
-        item.classList.add('user-prompt')
-        item.innerHTML = `
-          <div class="feed-item-header">
-            <div class="feed-item-icon">💬</div>
-            <div class="feed-item-title">You</div>
-            <div class="feed-item-time">${new Date(event.timestamp).toLocaleTimeString()}</div>
-          </div>
-          <div class="feed-item-content prompt-text">${escapeHtml(promptText)}</div>
-        `
+      case 'user_prompt_submit':
+        this.handlePrompt(event, sessionColor)
         break
-      }
-
-      case 'pre_tool_use': {
-        const e = event as PreToolUseEvent
-
-        // Skip if we already have an item for this toolUseId
-        if (this.feedEl.querySelector(`[data-tool-use-id="${e.toolUseId}"]`)) {
-          return
-        }
-
-        item.classList.add('tool-use', 'tool-pending')
-        item.dataset.toolUseId = e.toolUseId
-
-        const input = e.toolInput as Record<string, unknown>
-        const filePath = (input.file_path as string) ?? (input.path as string) ?? ''
-        const command = (input.command as string) ?? ''
-        const content = (input.content as string) ?? (input.new_string as string) ?? ''
-        const pattern = (input.pattern as string) ?? ''
-        const query = (input.query as string) ?? ''
-
-        // Check if this is an MCP tool with no useful preview - make it compact
-        const hasPreview = filePath || command || content || pattern || query
-        if (!hasPreview) {
-          item.classList.add('compact')
-        }
-
-        let preview = ''
-        if (filePath) {
-          preview = `<div class="feed-item-file">${escapeHtml(this.shortenPath(filePath))}</div>`
-        } else if (command) {
-          preview = `<div class="feed-item-code">${escapeHtml(command)}</div>`
-        } else if (pattern) {
-          preview = `<div class="feed-item-file">Pattern: ${escapeHtml(pattern)}</div>`
-        } else if (query) {
-          preview = `<div class="feed-item-file">Query: ${escapeHtml(query.slice(0, 100))}</div>`
-        }
-
-        let details = ''
-        if (content) {
-          const truncated = content.length > 500 ? content.slice(0, 500) + '...' : content
-          details = `
-            <div class="feed-item-details collapsed" id="details-${e.toolUseId}">
-              <div class="feed-item-code">${escapeHtml(truncated)}</div>
-            </div>
-            <div class="expand-toggle" data-target="details-${e.toolUseId}">▶ Show content</div>
-          `
-        }
-
-        // Show assistant text if present (text Claude wrote before tool call)
-        // Deduplicate: parallel tool calls share the same text, only show once
-        let assistantTextHtml = ''
-        if (e.assistantText && e.assistantText.trim()) {
-          const now = Date.now()
-          const isDuplicate =
-            this.lastAssistantText === e.assistantText &&
-            (now - this.lastAssistantTextTime) < this.ASSISTANT_TEXT_DEDUP_WINDOW
-
-          if (!isDuplicate) {
-            this.lastAssistantText = e.assistantText
-            this.lastAssistantTextTime = now
-
-            const isLong = e.assistantText.length > 400
-            const textContent = renderMarkdown(e.assistantText)
-            assistantTextHtml = `
-              <div class="feed-item-assistant-text ${isLong ? 'collapsed' : ''}" id="assistant-text-${e.toolUseId}">
-                ${textContent}
-              </div>
-              ${isLong ? `<div class="expand-toggle" data-target="assistant-text-${e.toolUseId}">▶ Show more</div>` : ''}
-            `
-          }
-        }
-
-        item.innerHTML = `
-          ${assistantTextHtml}
-          <div class="feed-item-header">
-            <div class="feed-item-icon">${getToolIcon(e.tool)}</div>
-            <div class="feed-item-title">${e.tool}</div>
-            <div class="feed-item-time">${new Date(event.timestamp).toLocaleTimeString()}</div>
-          </div>
-          ${preview}
-          ${details}
-        `
-
-        // Check if completion data already arrived
-        const completionData = this.completedData.get(e.toolUseId)
-        if (completionData) {
-          // Immediately mark as complete
-          item.classList.remove('tool-pending')
-          item.classList.add(completionData.success ? 'tool-success' : 'tool-fail')
-          if (completionData.duration) {
-            const header = item.querySelector('.feed-item-header')
-            if (header) {
-              const durationBadge = document.createElement('div')
-              durationBadge.className = 'feed-item-duration'
-              durationBadge.textContent = `${completionData.duration}ms`
-              header.appendChild(durationBadge)
-            }
-          }
-          // Add response preview if available
-          if (completionData.response) {
-            const responsePreview = this.createResponsePreview(e.tool, completionData.success, completionData.response)
-            if (responsePreview) {
-              item.insertAdjacentHTML('beforeend', responsePreview)
-            }
-          }
-          this.completedData.delete(e.toolUseId)
-        } else {
-          this.pendingItems.set(e.toolUseId, item)
-        }
+      case 'pre_tool_use':
+        this.handlePreTool(event as PreToolUseEvent)
         break
-      }
-
-      case 'post_tool_use': {
-        const e = event as PostToolUseEvent
-        const existing = this.pendingItems.get(e.toolUseId)
-
-        if (existing) {
-          // Update existing item
-          existing.classList.remove('tool-pending')
-          existing.classList.add(e.success ? 'tool-success' : 'tool-fail')
-
-          // Add duration badge
-          const header = existing.querySelector('.feed-item-header')
-          if (header && e.duration) {
-            const durationBadge = document.createElement('div')
-            durationBadge.className = 'feed-item-duration'
-            durationBadge.textContent = `${e.duration}ms`
-            header.appendChild(durationBadge)
-          }
-
-          // Add tool response preview
-          const response = e.toolResponse as Record<string, unknown>
-          const responsePreview = this.createResponsePreview(e.tool, e.success, response)
-          if (responsePreview) {
-            existing.insertAdjacentHTML('beforeend', responsePreview)
-          }
-
-          this.pendingItems.delete(e.toolUseId)
-        } else {
-          // No pending item yet - store completion data for when pre_tool_use arrives
-          this.completedData.set(e.toolUseId, { success: e.success, duration: e.duration, response: e.toolResponse })
-        }
-        return // Never create standalone "Completed" items
-      }
-
-      case 'stop': {
-        const e = event as { response?: string; timestamp: number }
-        const response = e.response?.trim() || ''
-
-        // Skip duplicate responses
-        if (response) {
-          const lastResponse = this.feedEl.querySelector('.feed-item.assistant-response:last-of-type .assistant-text')
-          if (lastResponse && response.slice(0, 100) === (lastResponse.textContent || '').slice(0, 100)) {
-            return
-          }
-        }
-
-        // If we have a response, show it as Claude's message
-        if (response) {
-          item.classList.add('assistant-response')
-          const isLong = response.length > 2000
-          const displayResponse = isLong ? response.slice(0, 2000) : response
-          item.innerHTML = `
-            <div class="feed-item-header">
-              <div class="feed-item-icon">🤖</div>
-              <div class="feed-item-title">Claude</div>
-              <div class="feed-item-time">${new Date(event.timestamp).toLocaleTimeString()}</div>
-            </div>
-            <div class="feed-item-content assistant-text">${renderMarkdown(displayResponse)}${isLong ? '<span class="show-more">... [show more - Alt+E]</span>' : ''}</div>
-          `
-          // Add click handler for "show more"
-          if (isLong) {
-            const showMore = item.querySelector('.show-more')
-            if (showMore) {
-              showMore.addEventListener('click', () => {
-                const textEl = item.querySelector('.assistant-text')
-                if (textEl) {
-                  textEl.innerHTML = renderMarkdown(response)
-                }
-              })
-            }
-          }
-        } else {
-          // No response - compact stop indicator
-          item.classList.add('lifecycle', 'compact')
-          item.innerHTML = `
-            <div class="feed-item-header">
-              <div class="feed-item-icon">🏁</div>
-              <div class="feed-item-title">Stopped</div>
-              <div class="feed-item-time">${new Date(event.timestamp).toLocaleTimeString()}</div>
-            </div>
-          `
-        }
+      case 'post_tool_use':
+        this.handlePostTool(event as PostToolUseEvent)
         break
-      }
-
-      default:
-        return // Don't add unknown events to feed
+      case 'stop':
+        this.handleStop(event)
+        break
     }
-
-    // Check scroll position BEFORE adding item (so isNearBottom is accurate)
-    const shouldScroll = event.type === 'user_prompt_submit' || this.isNearBottom()
-
-    this.feedEl.appendChild(item)
-
-    // Apply active filter - hide item if it doesn't match
-    if (this.activeFilter !== null && event.sessionId !== this.activeFilter) {
-      item.style.display = 'none'
-    } else if (shouldScroll) {
-      // Defer scroll to next frame so browser can calculate new scrollHeight
-      requestAnimationFrame(() => {
-        if (this.feedEl) {
-          this.feedEl.scrollTop = this.feedEl.scrollHeight
-        }
-      })
-    }
-
-    // Update scroll button visibility
-    this.updateScrollButton()
-
-    // Add click handler for expand toggles
-    item.querySelectorAll('.expand-toggle').forEach((toggle) => {
-      toggle.addEventListener('click', () => {
-        const targetId = (toggle as HTMLElement).dataset.target
-        if (!targetId) return
-        const details = document.getElementById(targetId)
-        if (details) {
-          const isCollapsed = details.classList.toggle('collapsed')
-          toggle.textContent = isCollapsed ? '▶ Show content' : '▼ Hide content'
-        }
-      })
-    })
   }
 
-  /**
-   * Create HTML for tool response preview
-   */
-  private createResponsePreview(tool: string, success: boolean, response: Record<string, unknown>): string {
-    if (tool === 'Bash' && response.output) {
-      const output = String(response.output).slice(0, 300)
-      if (output.trim()) {
-        return `<div class="feed-item-response"><div class="feed-item-code">${escapeHtml(output)}</div></div>`
-      }
-    } else if ((tool === 'Grep' || tool === 'Glob') && response.result) {
-      const lines = String(response.result).split('\n').slice(0, 5).join('\n')
-      if (lines.trim()) {
-        return `<div class="feed-item-response"><div class="feed-item-code">${escapeHtml(lines)}</div></div>`
-      }
-    } else if (!success && response.error) {
-      return `<div class="feed-item-response error"><div class="feed-item-error">${escapeHtml(String(response.error).slice(0, 200))}</div></div>`
+  // ── user_prompt_submit → new task ──
+
+  private handlePrompt(event: ClaudeEvent, sessionColor?: number): void {
+    const e = event as { prompt?: string; timestamp: number; sessionId: string; id: string }
+    const prompt = e.prompt ?? ''
+
+    // Skip duplicate prompts
+    if (this.tasks.length > 0) {
+      const last = this.tasks[this.tasks.length - 1]
+      if (last.prompt === prompt && last.sessionId === event.sessionId) return
     }
-    return ''
+
+    const task: TaskSummary = {
+      id: event.id,
+      prompt,
+      timestamp: event.timestamp,
+      sessionId: event.sessionId,
+      status: 'working',
+      tools: [],
+      subTasks: [],
+      filesChanged: new Set(),
+      filesRead: new Set(),
+    }
+
+    this.tasks.push(task)
+    this.currentTaskId = task.id
+
+    const card = this.createTaskCard(task, sessionColor)
+    this.taskElements.set(task.id, card)
+
+    const shouldScroll = this.isNearBottom()
+    this.feedEl!.appendChild(card)
+
+    if (this.activeFilter !== null && event.sessionId !== this.activeFilter) {
+      card.style.display = 'none'
+    } else if (shouldScroll) {
+      this.scrollToBottom()
+    }
+
+    this.updateScrollButton()
+  }
+
+  // ── pre_tool_use → add tool to current task ──
+
+  private handlePreTool(event: PreToolUseEvent): void {
+    const task = this.findTaskForSession(event.sessionId)
+    if (!task) return
+
+    const input = event.toolInput as Record<string, unknown>
+    const filePath = (input.file_path as string) ?? (input.path as string) ?? ''
+    const command = (input.command as string) ?? ''
+
+    // Track files
+    if (filePath) {
+      const writingTools = ['Write', 'Edit', 'NotebookEdit']
+      if (writingTools.includes(event.tool)) {
+        task.filesChanged.add(filePath)
+      } else {
+        task.filesRead.add(filePath)
+      }
+    }
+
+    // Sub-task branch (Task/Agent tool)
+    if (event.tool === 'Task' || event.tool === 'Agent') {
+      const desc = (input.description as string) ?? (input.prompt as string) ?? 'Sub-task'
+      task.subTasks.push({
+        toolUseId: event.toolUseId,
+        description: desc.slice(0, 120),
+        status: 'running',
+      })
+      this.rerenderTask(task)
+      return
+    }
+
+    const toolEntry: TaskTool = {
+      tool: event.tool,
+      toolUseId: event.toolUseId,
+      file: filePath ? this.shortenPath(filePath) : undefined,
+      command: command ? command.slice(0, 100) : undefined,
+    }
+
+    // Check if completion data arrived early
+    const completed = this.completedData.get(event.toolUseId)
+    if (completed) {
+      toolEntry.success = completed.success
+      toolEntry.duration = completed.duration
+      this.completedData.delete(event.toolUseId)
+    }
+
+    task.tools.push(toolEntry)
+
+    // Show assistant text if present
+    if (event.assistantText?.trim()) {
+      const now = Date.now()
+      const isDup = this.lastAssistantText === event.assistantText &&
+        (now - this.lastAssistantTextTime) < 2000
+      if (!isDup) {
+        this.lastAssistantText = event.assistantText
+        this.lastAssistantTextTime = now
+        // Store on the task for display
+        ;(task as any)._lastAssistantText = event.assistantText
+      }
+    }
+
+    this.rerenderTask(task)
+  }
+
+  // ── post_tool_use → update tool status ──
+
+  private handlePostTool(event: PostToolUseEvent): void {
+    const task = this.findTaskForSession(event.sessionId)
+    if (!task) {
+      // Store for when pre arrives
+      this.completedData.set(event.toolUseId, { success: event.success, duration: event.duration })
+      return
+    }
+
+    // Check sub-tasks first
+    const subTask = task.subTasks.find(s => s.toolUseId === event.toolUseId)
+    if (subTask) {
+      subTask.status = 'done'
+      this.rerenderTask(task)
+      return
+    }
+
+    // Update tool entry
+    const tool = task.tools.find(t => t.toolUseId === event.toolUseId)
+    if (tool) {
+      tool.success = event.success
+      tool.duration = event.duration
+      this.rerenderTask(task)
+    } else {
+      // Pre hasn't arrived yet — store
+      this.completedData.set(event.toolUseId, { success: event.success, duration: event.duration })
+    }
+  }
+
+  // ── stop → mark task done ──
+
+  private handleStop(event: ClaudeEvent): void {
+    const e = event as { response?: string; sessionId: string }
+    const task = this.findTaskForSession(e.sessionId)
+    if (!task) return
+
+    task.status = 'done'
+    task.response = e.response?.trim() || undefined
+    this.rerenderTask(task)
+  }
+
+  // ============================================================================
+  // Helpers
+  // ============================================================================
+
+  private findTaskForSession(sessionId: string): TaskSummary | null {
+    // Find the most recent working task for this session, or the latest one
+    for (let i = this.tasks.length - 1; i >= 0; i--) {
+      if (this.tasks[i].sessionId === sessionId) {
+        return this.tasks[i]
+      }
+    }
+    return null
+  }
+
+  // ============================================================================
+  // Rendering
+  // ============================================================================
+
+  private createTaskCard(task: TaskSummary, sessionColor?: number): HTMLElement {
+    const card = document.createElement('div')
+    card.className = 'task-card'
+    card.dataset.taskId = task.id
+    card.dataset.sessionId = task.sessionId
+
+    if (sessionColor !== undefined) {
+      card.style.setProperty('--session-color', `#${sessionColor.toString(16).padStart(6, '0')}`)
+    }
+
+    this.fillTaskCard(card, task)
+    return card
+  }
+
+  private rerenderTask(task: TaskSummary): void {
+    const card = this.taskElements.get(task.id)
+    if (!card) return
+
+    const shouldScroll = this.isNearBottom()
+    this.fillTaskCard(card, task)
+
+    if (shouldScroll) {
+      this.scrollToBottom()
+    }
+  }
+
+  private fillTaskCard(card: HTMLElement, task: TaskSummary): void {
+    const isDone = task.status === 'done'
+    const statusIcon = isDone ? '✅' : '🔵'
+    const statusClass = isDone ? 'done' : 'working'
+
+    // Prompt (truncated)
+    const promptShort = task.prompt.length > 150
+      ? task.prompt.slice(0, 150) + '...'
+      : task.prompt
+
+    // Tool summary
+    const toolCount = task.tools.length
+    const successCount = task.tools.filter(t => t.success === true).length
+    const failCount = task.tools.filter(t => t.success === false).length
+    const pendingCount = task.tools.filter(t => t.success === undefined).length
+
+    // Files summary
+    const changedFiles = [...task.filesChanged]
+    const readFiles = [...task.filesRead].filter(f => !task.filesChanged.has(f))
+
+    // Sub-tasks
+    const branches = task.subTasks.length
+    const branchesRunning = task.subTasks.filter(s => s.status === 'running').length
+    const branchesDone = task.subTasks.filter(s => s.status === 'done').length
+
+    // Time
+    const timeStr = new Date(task.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
+    // Build HTML
+    let html = `
+      <div class="task-header ${statusClass}">
+        <span class="task-status">${statusIcon}</span>
+        <span class="task-prompt">${escapeHtml(promptShort)}</span>
+        <span class="task-time">${timeStr}</span>
+      </div>
+    `
+
+    // Progress bar (only when working)
+    if (!isDone && toolCount > 0) {
+      html += `
+        <div class="task-progress">
+          <div class="task-progress-bar">
+            <div class="task-progress-fill" style="width: ${pendingCount > 0 ? '100' : '100'}%"></div>
+          </div>
+          <span class="task-progress-label">${toolCount} tool${toolCount !== 1 ? 's' : ''} used</span>
+        </div>
+      `
+    }
+
+    // Tool pills (compact)
+    if (toolCount > 0) {
+      const toolGroups = this.groupTools(task.tools)
+      const pillsHtml = toolGroups.map(g => {
+        const icon = getToolIcon(g.tool)
+        const statusCls = g.allSuccess ? 'pill-ok' : g.anyFail ? 'pill-fail' : 'pill-pending'
+        return `<span class="tool-pill ${statusCls}" title="${g.tool}: ${g.count}x">${icon} ${g.tool}${g.count > 1 ? ` ×${g.count}` : ''}</span>`
+      }).join('')
+
+      html += `<div class="task-tools">${pillsHtml}</div>`
+    }
+
+    // Files touched
+    if (changedFiles.length > 0 || readFiles.length > 0) {
+      let filesHtml = ''
+      if (changedFiles.length > 0) {
+        const fileList = changedFiles.slice(0, 5).map(f => escapeHtml(this.shortenPath(f))).join(', ')
+        const more = changedFiles.length > 5 ? ` +${changedFiles.length - 5}` : ''
+        filesHtml += `<span class="task-files-changed" title="Files modified">✏️ ${fileList}${more}</span>`
+      }
+      if (readFiles.length > 0) {
+        const count = readFiles.length
+        filesHtml += `<span class="task-files-read" title="${count} files read">📖 ${count} file${count !== 1 ? 's' : ''} read</span>`
+      }
+      html += `<div class="task-files">${filesHtml}</div>`
+    }
+
+    // Sub-task branches
+    if (branches > 0) {
+      const branchItems = task.subTasks.map(s => {
+        const icon = s.status === 'done' ? '✅' : '⏳'
+        return `<div class="task-branch">${icon} ${escapeHtml(s.description)}</div>`
+      }).join('')
+
+      html += `
+        <div class="task-branches">
+          <div class="task-branches-header" data-task-id="${task.id}">
+            🌿 ${branches} branch${branches !== 1 ? 'es' : ''} (${branchesDone} done${branchesRunning > 0 ? `, ${branchesRunning} running` : ''})
+          </div>
+          <div class="task-branches-list" id="branches-${task.id}">
+            ${branchItems}
+          </div>
+        </div>
+      `
+    }
+
+    // Response summary (when done)
+    if (isDone && task.response) {
+      const responseShort = task.response.length > 300
+        ? task.response.slice(0, 300) + '...'
+        : task.response
+      html += `
+        <div class="task-response">
+          <div class="task-response-text">${renderMarkdown(responseShort)}</div>
+        </div>
+      `
+    }
+
+    // Stats footer
+    if (toolCount > 0 || branches > 0) {
+      const parts: string[] = []
+      if (toolCount > 0) parts.push(`${successCount}/${toolCount} tools`)
+      if (failCount > 0) parts.push(`${failCount} failed`)
+      if (branches > 0) parts.push(`${branches} branches`)
+      html += `<div class="task-footer">${parts.join(' · ')}</div>`
+    }
+
+    card.innerHTML = html
+    card.className = `task-card ${statusClass}`
+    card.dataset.taskId = task.id
+    card.dataset.sessionId = task.sessionId
+
+    // Attach branch toggle
+    const branchHeader = card.querySelector('.task-branches-header')
+    if (branchHeader) {
+      branchHeader.addEventListener('click', () => {
+        const list = card.querySelector('.task-branches-list')
+        if (list) list.classList.toggle('collapsed')
+      })
+    }
+  }
+
+  private groupTools(tools: TaskTool[]): Array<{ tool: string; count: number; allSuccess: boolean; anyFail: boolean }> {
+    const groups = new Map<string, { count: number; allSuccess: boolean; anyFail: boolean }>()
+    for (const t of tools) {
+      const g = groups.get(t.tool) ?? { count: 0, allSuccess: true, anyFail: false }
+      g.count++
+      if (t.success !== true) g.allSuccess = false
+      if (t.success === false) g.anyFail = true
+      groups.set(t.tool, g)
+    }
+    return [...groups.entries()].map(([tool, g]) => ({ tool, ...g }))
   }
 }
 
 // ============================================================================
-// Helper Functions (pure, stateless)
+// Helper Functions (pure, stateless) — preserved exports
 // ============================================================================
 
-/**
- * Format token count with human-readable suffixes
- */
 export function formatTokens(tokens: number): string {
-  if (tokens >= 1_000_000) {
-    return `${(tokens / 1_000_000).toFixed(1)}M tok`
-  }
-  if (tokens >= 1_000) {
-    return `${(tokens / 1_000).toFixed(1)}k tok`
-  }
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M tok`
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k tok`
   return `${tokens} tok`
 }
 
-/**
- * Format timestamp as relative time
- */
 export function formatTimeAgo(timestamp: number): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000)
   if (seconds < 30) return 'just now'
@@ -524,50 +567,27 @@ export function formatTimeAgo(timestamp: number): string {
   return `${days}d ago`
 }
 
-/**
- * Escape HTML special characters
- */
 export function escapeHtml(text: string): string {
   const div = document.createElement('div')
   div.textContent = text
   return div.innerHTML
 }
 
-/**
- * Simple markdown to HTML for responses
- */
 export function renderMarkdown(text: string): string {
   let html = escapeHtml(text)
-
-  // Code blocks (```...```)
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
-
-  // Inline code (`...`)
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>')
-
-  // Bold (**...** or __...__)
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
   html = html.replace(/__([^_]+)__/g, '<strong>$1</strong>')
-
-  // Italic (*... or _...)
   html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>')
-
-  // Headers (## ...)
   html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>')
   html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>')
   html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>')
-
-  // Bullet lists (- ... or * ...)
   html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>')
   html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
-
-  // Line breaks
   html = html.replace(/\n/g, '<br>')
-
-  // Clean up extra breaks in code blocks
-  html = html.replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/g, (match, code) => {
+  html = html.replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/g, (_match, code) => {
     return '<pre><code>' + code.replace(/<br>/g, '\n') + '</code></pre>'
   })
-
   return html
 }

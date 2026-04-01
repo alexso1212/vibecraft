@@ -11,6 +11,7 @@ import { registerSubagentHandlers } from './subagentHandlers'
 import { registerZoneHandlers } from './zoneHandlers'
 import { registerFeedHandlers } from './feedHandlers'
 import { registerAnimationHandlers } from './animationHandlers'
+import { registerModeHandlers } from './modeHandlers'
 
 /**
  * Register all EventBus handlers
@@ -24,6 +25,7 @@ export function registerAllHandlers(): void {
   registerZoneHandlers()
   registerFeedHandlers()
   registerAnimationHandlers()
+  registerModeHandlers()
 }
 
 // Re-export individual registrations for testing
@@ -35,4 +37,5 @@ export {
   registerZoneHandlers,
   registerFeedHandlers,
   registerAnimationHandlers,
+  registerModeHandlers,
 }

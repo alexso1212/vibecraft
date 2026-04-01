@@ -56,6 +56,10 @@ export type SoundName =
   | 'prompt' | 'stop' | 'notification' | 'thinking'
   // Voice input
   | 'voice_start' | 'voice_stop'
+  // Mode effects
+  | 'ecc_activate' | 'ecc_deactivate'
+  | 'superpower_activate' | 'superpower_deactivate'
+  | 'octopus_activate' | 'octopus_deactivate' | 'octopus_tentacle' | 'octopus_complete'
   // App startup
   | 'intro'
 
@@ -133,6 +137,16 @@ const SOUND_SPATIAL_MODE: Record<SoundName, SpatialMode> = {
   // Voice input - global (user action)
   voice_start: 'global',
   voice_stop: 'global',
+
+  // Mode effects - positional (zone-specific)
+  ecc_activate: 'positional',
+  ecc_deactivate: 'positional',
+  superpower_activate: 'positional',
+  superpower_deactivate: 'positional',
+  octopus_activate: 'positional',
+  octopus_deactivate: 'positional',
+  octopus_tentacle: 'positional',
+  octopus_complete: 'positional',
 
   // App startup - global
   intro: 'global',
@@ -940,6 +954,120 @@ class SoundManager {
       synth.triggerAttackRelease('E5', '32n')
       setTimeout(() => synth.triggerAttackRelease('C5', '32n'), 60)
       this.releaseSynth(synth, 250)
+    },
+
+    // === MODE EFFECTS ===
+
+    ecc_activate: () => {
+      // Shadow clone charge-up: rising hum + confirmation chime
+      const synth = this.getSynth({ type: 'sine', attack: 0.15, decay: 0.3, sustain: 0.2, release: 0.4 })
+      synth.volume.value = this.applySpatialVolume(VOL.NORMAL)
+      const now = Tone.now()
+      synth.triggerAttackRelease('C3', '8n', now)
+      synth.triggerAttackRelease('G3', '8n', now + 0.12)
+      synth.triggerAttackRelease('C4', '8n', now + 0.24)
+      // Confirmation chime
+      setTimeout(() => {
+        const chime = this.getSynth({ type: 'triangle', attack: 0.01, decay: 0.15, sustain: 0, release: 0.3 })
+        chime.volume.value = this.applySpatialVolume(VOL.SOFT)
+        chime.triggerAttackRelease('E5', '16n')
+        setTimeout(() => chime.triggerAttackRelease('G5', '16n'), 60)
+        this.releaseSynth(chime, 500)
+      }, 350)
+      this.releaseSynth(synth, 600)
+    },
+
+    ecc_deactivate: () => {
+      // Soft descending fade
+      const synth = this.getSynth({ type: 'sine', attack: 0.01, decay: 0.2, sustain: 0.1, release: 0.3 })
+      synth.volume.value = this.applySpatialVolume(VOL.QUIET)
+      synth.triggerAttackRelease('G4', '16n')
+      setTimeout(() => synth.triggerAttackRelease('E4', '16n'), 80)
+      setTimeout(() => synth.triggerAttackRelease('C4', '16n'), 160)
+      this.releaseSynth(synth, 500)
+    },
+
+    superpower_activate: () => {
+      // Prism split chord — bold, bright, wide voicing
+      const synth = this.createDisposablePolySynth(
+        { type: 'sawtooth', attack: 0.03, decay: 0.3, sustain: 0.25, release: 0.6 },
+        this.applySpatialVolume(VOL.PROMINENT),
+        1500
+      )
+      const now = Tone.now()
+      synth.triggerAttackRelease('C4', '4n', now)
+      synth.triggerAttackRelease('E4', '4n', now + 0.04)
+      synth.triggerAttackRelease('G4', '4n', now + 0.08)
+      synth.triggerAttackRelease('C5', '4n', now + 0.12)
+      // Shimmer overtone
+      setTimeout(() => {
+        const shimmer = this.getSynth({ type: 'sine', attack: 0.01, decay: 0.1, sustain: 0, release: 0.2 })
+        shimmer.volume.value = this.applySpatialVolume(VOL.QUIET)
+        shimmer.triggerAttackRelease('E6', '32n')
+        setTimeout(() => shimmer.triggerAttackRelease('G6', '32n'), 40)
+        this.releaseSynth(shimmer, 400)
+      }, 200)
+    },
+
+    superpower_deactivate: () => {
+      // Gentle descending triad
+      const synth = this.getSynth({ type: 'triangle', attack: 0.01, decay: 0.2, sustain: 0.1, release: 0.4 })
+      synth.volume.value = this.applySpatialVolume(VOL.QUIET)
+      synth.triggerAttackRelease('G4', '16n')
+      setTimeout(() => synth.triggerAttackRelease('E4', '16n'), 70)
+      setTimeout(() => synth.triggerAttackRelease('C4', '16n'), 140)
+      this.releaseSynth(synth, 500)
+    },
+
+    octopus_activate: () => {
+      // Submarine engine start — deep rumble rising to whoosh
+      const synth = this.getSynth({ type: 'sawtooth', attack: 0.2, decay: 0.4, sustain: 0.3, release: 0.5 })
+      synth.volume.value = this.applySpatialVolume(VOL.NORMAL)
+      const now = Tone.now()
+      synth.triggerAttackRelease('C2', '4n', now)
+      setTimeout(() => {
+        const rise = this.getSynth({ type: 'sine', attack: 0.1, decay: 0.3, sustain: 0.15, release: 0.3 })
+        rise.volume.value = this.applySpatialVolume(VOL.SOFT)
+        rise.triggerAttackRelease('G2', '8n')
+        setTimeout(() => rise.triggerAttackRelease('C3', '8n'), 100)
+        setTimeout(() => rise.triggerAttackRelease('G3', '8n'), 200)
+        this.releaseSynth(rise, 600)
+      }, 250)
+      this.releaseSynth(synth, 800)
+    },
+
+    octopus_deactivate: () => {
+      // Engine power-down — descending rumble
+      const synth = this.getSynth({ type: 'sine', attack: 0.01, decay: 0.25, sustain: 0.1, release: 0.4 })
+      synth.volume.value = this.applySpatialVolume(VOL.QUIET)
+      synth.triggerAttackRelease('G3', '16n')
+      setTimeout(() => synth.triggerAttackRelease('C3', '16n'), 100)
+      setTimeout(() => synth.triggerAttackRelease('G2', '8n'), 200)
+      this.releaseSynth(synth, 600)
+    },
+
+    octopus_tentacle: () => {
+      // Whoosh — quick sweep for tentacle connection
+      const synth = this.getSynth({ type: 'sine', attack: 0.01, decay: 0.15, sustain: 0, release: 0.2 })
+      synth.volume.value = this.applySpatialVolume(VOL.QUIET)
+      synth.triggerAttackRelease('D3', '16n')
+      setTimeout(() => synth.triggerAttackRelease('A3', '16n'), 40)
+      setTimeout(() => synth.triggerAttackRelease('D4', '32n'), 80)
+      this.releaseSynth(synth, 300)
+    },
+
+    octopus_complete: () => {
+      // Completion chord — resolved, satisfying
+      const synth = this.createDisposablePolySynth(
+        { type: 'triangle', attack: 0.05, decay: 0.3, sustain: 0.2, release: 0.5 },
+        this.applySpatialVolume(VOL.PROMINENT),
+        1200
+      )
+      const now = Tone.now()
+      synth.triggerAttackRelease('G3', '4n', now)
+      synth.triggerAttackRelease('B3', '4n', now + 0.05)
+      synth.triggerAttackRelease('D4', '4n', now + 0.1)
+      synth.triggerAttackRelease('G4', '4n', now + 0.15)
     },
 
     // === APP STARTUP ===

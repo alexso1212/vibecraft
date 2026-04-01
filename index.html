@@ -90,6 +90,13 @@
           </div>
         </div>
 
+        <!-- FX Mode Buttons (bottom right of scene) -->
+        <div id="fx-panel">
+          <button class="fx-btn" data-mode="ecc" title="影分身 ECC">👥</button>
+          <button class="fx-btn" data-mode="superpower" title="川普 Superpower">🦅</button>
+          <button class="fx-btn" data-mode="octopus" title="触手 Octopus">🐙</button>
+        </div>
+
         <!-- Draw Mode UI (bottom right of scene) -->
         <div id="draw-indicator">
           <span class="draw-mode-label">DRAW MODE</span>
@@ -179,8 +186,13 @@
 
         <div class="modal-field">
           <label for="session-cwd-input">Directory</label>
-          <input type="text" id="session-cwd-input" placeholder="Click to select project..." autocomplete="off" />
-          <div class="field-hint">Click input to browse projects. Default: <code id="modal-default-cwd">~</code></div>
+          <div class="dir-input-row">
+            <input type="text" id="session-cwd-input" placeholder="Type path or browse..." autocomplete="off" />
+            <button type="button" id="session-browse-btn" class="browse-btn" title="Open Finder to select folder">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 3a1 1 0 011-1h3.586a1 1 0 01.707.293L8.414 3.414A1 1 0 009 3.707V4H13a1 1 0 011 1v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+          <div class="field-hint">Type a path, select from projects, or <strong>browse</strong> with Finder. Default: <code id="modal-default-cwd">~</code></div>
         </div>
 
         <div class="modal-field">

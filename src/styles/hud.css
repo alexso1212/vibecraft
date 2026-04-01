@@ -466,6 +466,54 @@
   pointer-events: auto;
 }
 
+/* ============================================================================
+   FX MODE PANEL
+   ============================================================================ */
+
+#fx-panel {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 90;
+}
+
+.fx-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  font-size: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s, border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  opacity: 0.7;
+}
+
+.fx-btn:hover {
+  opacity: 1;
+  transform: scale(1.1);
+  border-color: rgba(255, 255, 255, 0.4);
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.fx-btn.active {
+  opacity: 1;
+  border-color: rgba(34, 211, 238, 0.8);
+  box-shadow: 0 0 12px rgba(34, 211, 238, 0.4), inset 0 0 8px rgba(34, 211, 238, 0.15);
+  background: rgba(34, 211, 238, 0.15);
+  transform: scale(1.05);
+}
+
+.fx-btn.active:hover {
+  transform: scale(1.15);
+}
+
 /* Color buttons */
 .draw-color-btn {
   width: 36px;

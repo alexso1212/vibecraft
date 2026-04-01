@@ -59,7 +59,8 @@ export class TerminalView {
       fontFamily: '"SF Mono", "Fira Code", "JetBrains Mono", Menlo, monospace',
       cursorBlink: true,
       cursorStyle: 'bar',
-      scrollback: 5000,
+      scrollback: 10000,
+      convertEol: true,
       allowProposedApi: true,
     })
 
