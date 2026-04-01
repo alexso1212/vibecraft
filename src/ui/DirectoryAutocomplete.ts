@@ -10,9 +10,11 @@ declare const __VIBECRAFT_DEFAULT_PORT__: number
 const API_PORT = __VIBECRAFT_DEFAULT_PORT__
 const API_URL = `http://localhost:${API_PORT}`
 
-interface AutocompleteResult {
+interface AutocompleteItem {
   path: string
-  isKnown: boolean  // true if from known projects
+  name: string
+  type?: 'session' | 'project'
+  status?: string
 }
 
 /**
@@ -24,7 +26,7 @@ export function setupDirectoryAutocomplete(
 ): () => void {
   let dropdown: HTMLElement | null = null
   let selectedIndex = 0
-  let results: string[] = []
+  let items: AutocompleteItem[] = []
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
   const createDropdown = () => {
@@ -37,15 +39,17 @@ export function setupDirectoryAutocomplete(
       top: 100%;
       left: 0;
       right: 0;
-      max-height: 200px;
+      max-height: 300px;
       overflow-y: auto;
       background: rgba(20, 20, 25, 0.98);
-      border: 1px solid rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.15);
       border-radius: 8px;
       margin-top: 4px;
       display: none;
       z-index: 1001;
       backdrop-filter: blur(8px);
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.25) transparent;
     `
     // Ensure parent has relative positioning
     const parent = input.parentElement
@@ -58,48 +62,80 @@ export function setupDirectoryAutocomplete(
 
   const renderDropdown = () => {
     const dd = createDropdown()
-    if (results.length === 0) {
+    if (items.length === 0) {
       dd.style.display = 'none'
       return
     }
 
-    dd.innerHTML = results.map((path, i) => {
-      // Extract display name (last component)
-      const name = path.replace(/\/+$/, '').split('/').pop() || path
-      // Shorten path for display
-      const shortPath = path.startsWith('/home/')
-        ? '~' + path.slice(path.indexOf('/', 6))
-        : path
+    dd.innerHTML = items.map((item, i) => {
+      const shortPath = shortenPath(item.path)
+      const isSession = item.type === 'session'
+      const badge = isSession
+        ? `<span class="dir-badge session">${statusDot(item.status)} session</span>`
+        : ''
 
       return `
-        <div class="dir-item${i === selectedIndex ? ' selected' : ''}" data-index="${i}">
-          <span class="dir-name">${escapeHtml(name)}</span>
+        <div class="dir-item${i === selectedIndex ? ' selected' : ''}${isSession ? ' is-session' : ''}" data-index="${i}">
+          <div class="dir-item-header">
+            <span class="dir-name">${escapeHtml(item.name)}</span>
+            ${badge}
+          </div>
           <span class="dir-path">${escapeHtml(shortPath)}</span>
         </div>
       `
     }).join('')
 
     // Style items
-    dd.querySelectorAll('.dir-item').forEach((item) => {
-      const el = item as HTMLElement
-      el.style.cssText = `
-        padding: 8px 12px;
+    dd.querySelectorAll('.dir-item').forEach((el) => {
+      const item = el as HTMLElement
+      item.style.cssText = `
+        padding: 10px 12px;
         cursor: pointer;
         display: flex;
         flex-direction: column;
         gap: 2px;
+        border-bottom: 1px solid rgba(255,255,255,0.05);
+        transition: background 0.1s;
       `
-      if (el.classList.contains('selected')) {
-        el.style.background = 'rgba(74, 200, 232, 0.2)'
+      if (item.classList.contains('selected')) {
+        item.style.background = 'rgba(167, 139, 250, 0.25)'
       }
+      item.addEventListener('mouseenter', () => {
+        item.style.background = 'rgba(255,255,255,0.08)'
+      })
+      item.addEventListener('mouseleave', () => {
+        item.style.background = item.classList.contains('selected')
+          ? 'rgba(167, 139, 250, 0.25)'
+          : ''
+      })
+    })
+
+    dd.querySelectorAll('.dir-item-header').forEach((el) => {
+      (el as HTMLElement).style.cssText = `
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      `
     })
 
     dd.querySelectorAll('.dir-name').forEach((el) => {
       (el as HTMLElement).style.cssText = `
-        color: #4ac8e8;
-        font-family: ui-monospace, monospace;
+        color: #c4b5fd;
         font-weight: 600;
         font-size: 13px;
+      `
+    })
+
+    dd.querySelectorAll('.dir-badge').forEach((el) => {
+      (el as HTMLElement).style.cssText = `
+        font-size: 10px;
+        padding: 1px 6px;
+        border-radius: 4px;
+        background: rgba(56, 189, 248, 0.15);
+        color: #7dd3fc;
+        white-space: nowrap;
+        flex-shrink: 0;
       `
     })
 
@@ -122,25 +158,33 @@ export function setupDirectoryAutocomplete(
     if (dropdown) {
       dropdown.style.display = 'none'
     }
-    results = []
+    items = []
     selectedIndex = 0
   }
 
-  const selectResult = (path: string) => {
-    input.value = path
+  const selectResult = (item: AutocompleteItem) => {
+    input.value = item.path
     input.focus()
     hideDropdown()
     // Trigger input event so name auto-fill works
     input.dispatchEvent(new Event('input', { bubbles: true }))
-    onSelect?.(path)
+    onSelect?.(item.path)
   }
 
   const fetchResults = async (query: string) => {
     try {
       const response = await fetch(`${API_URL}/projects/autocomplete?q=${encodeURIComponent(query)}`)
       const data = await response.json()
-      if (data.ok && Array.isArray(data.results)) {
-        results = data.results
+      if (data.ok && Array.isArray(data.items)) {
+        items = data.items
+        selectedIndex = 0
+        renderDropdown()
+      } else if (data.ok && Array.isArray(data.results)) {
+        // Fallback for old API format
+        items = data.results.map((path: string) => ({
+          path,
+          name: path.replace(/\/+$/, '').split('/').pop() || path,
+        }))
         selectedIndex = 0
         renderDropdown()
       }
@@ -172,33 +216,33 @@ export function setupDirectoryAutocomplete(
   }
 
   const handleKeydown = (e: KeyboardEvent) => {
-    if (results.length === 0) return
+    if (items.length === 0) return
 
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault()
-        selectedIndex = (selectedIndex + 1) % results.length
+        selectedIndex = (selectedIndex + 1) % items.length
         renderDropdown()
         break
 
       case 'ArrowUp':
         e.preventDefault()
-        selectedIndex = (selectedIndex - 1 + results.length) % results.length
+        selectedIndex = (selectedIndex - 1 + items.length) % items.length
         renderDropdown()
         break
 
       case 'Tab':
-        if (results.length > 0) {
+        if (items.length > 0) {
           e.preventDefault()
-          selectResult(results[selectedIndex])
+          selectResult(items[selectedIndex])
         }
         break
 
       case 'Enter':
-        if (results.length > 0 && dropdown?.style.display !== 'none') {
+        if (items.length > 0 && dropdown?.style.display !== 'none') {
           e.preventDefault()
           e.stopPropagation()
-          selectResult(results[selectedIndex])
+          selectResult(items[selectedIndex])
         }
         break
 
@@ -213,7 +257,7 @@ export function setupDirectoryAutocomplete(
     const item = target.closest('.dir-item') as HTMLElement
     if (item) {
       const index = parseInt(item.dataset.index || '0', 10)
-      selectResult(results[index])
+      selectResult(items[index])
     }
   }
 
@@ -251,4 +295,22 @@ function escapeHtml(text: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
+}
+
+/** Shorten an absolute path for display (replace home dir with ~) */
+function shortenPath(path: string): string {
+  // Match /Users/xxx or /home/xxx prefix
+  return path.replace(/^\/(?:Users|home)\/[^/]+/, '~')
+}
+
+/** Status dot for session items */
+function statusDot(status?: string): string {
+  const colors: Record<string, string> = {
+    working: '#22d3ee',
+    idle: '#4ade80',
+    offline: '#f87171',
+    waiting: '#fbbf24',
+  }
+  const color = colors[status || ''] || '#94a3b8'
+  return `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${color};margin-right:3px;"></span>`
 }

@@ -2254,6 +2254,49 @@ function setupTerminalToggle() {
   // Now handled by setupTerminalView() after client is ready
 }
 
+function setupPanelResize(): void {
+  const handle = document.getElementById('panel-resize-handle')
+  const scenePanel = document.getElementById('scene-panel')
+  const feedPanel = document.getElementById('feed-panel')
+  if (!handle || !scenePanel || !feedPanel) return
+
+  let dragging = false
+  let startX = 0
+  let startSceneWidth = 0
+  let startFeedWidth = 0
+
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault()
+    dragging = true
+    startX = e.clientX
+    startSceneWidth = scenePanel.offsetWidth
+    startFeedWidth = feedPanel.offsetWidth
+    handle.classList.add('dragging')
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+  })
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return
+    const dx = e.clientX - startX
+    const newSceneWidth = Math.max(200, startSceneWidth + dx)
+    const newFeedWidth = Math.max(280, startFeedWidth - dx)
+    const totalFlex = newSceneWidth + newFeedWidth
+    scenePanel.style.flex = String(newSceneWidth / totalFlex)
+    feedPanel.style.flex = String(newFeedWidth / totalFlex)
+    // Trigger Three.js resize
+    window.dispatchEvent(new Event('resize'))
+  })
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return
+    dragging = false
+    handle.classList.remove('dragging')
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+  })
+}
+
 // ============================================================================
 // Audio Initialization
 // ============================================================================
@@ -2898,6 +2941,9 @@ function init() {
 
   // Setup terminal toggle (legacy stub)
   setupTerminalToggle()
+
+  // Setup panel resize handle (drag between 3D scene and sidebar)
+  setupPanelResize()
 
   // Setup xterm.js terminal view (needs client)
   setupTerminalView()

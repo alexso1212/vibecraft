@@ -821,6 +821,12 @@ function createSession(options: CreateSessionRequest = {}): Promise<ManagedSessi
         return
       }
 
+      // Disable alternate screen so TUI apps (Claude Code) keep output in main
+      // scrollback buffer, enabling terminal scroll in the browser
+      execFile('tmux', [
+        'set-option', '-t', tmuxSession, 'alternate-screen', 'off'
+      ], EXEC_OPTIONS, () => {})
+
       const session: ManagedSession = {
         id,
         name,
@@ -1585,7 +1591,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse) {
     return
   }
 
-  // Config (username, etc)
+  // Config (username, hostname, cwd, tmux session)
   if (req.method === 'GET' && req.url === '/config') {
     const username = process.env.USER || process.env.USERNAME || 'claude-user'
     const host = hostname()
@@ -1594,6 +1600,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse) {
       username,
       hostname: host,
       tmuxSession: TMUX_SESSION,
+      cwd: process.cwd(),
     }))
     return
   }
@@ -1692,54 +1699,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse) {
     return
   }
 
-  // Get pending prompt
-  if (req.method === 'GET' && req.url === '/prompt') {
-    if (existsSync(PENDING_PROMPT_FILE)) {
-      const prompt = readFileSync(PENDING_PROMPT_FILE, 'utf-8')
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ prompt, file: PENDING_PROMPT_FILE }))
-    } else {
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ prompt: null }))
-    }
-    return
-  }
-
-  // Clear pending prompt
-  if (req.method === 'DELETE' && req.url === '/prompt') {
-    if (existsSync(PENDING_PROMPT_FILE)) {
-      unlinkSync(PENDING_PROMPT_FILE)
-      log('Pending prompt cleared')
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ok: true }))
-    return
-  }
-
-  // Get tmux output (Claude's responses)
-  if (req.method === 'GET' && req.url === '/tmux-output') {
-    try {
-      validateTmuxSession(TMUX_SESSION)
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: false, error: 'Invalid tmux session name', output: '' }))
-      return
-    }
-
-    // Capture last 100 lines from tmux pane
-    execFile('tmux', ['capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-100'], { ...EXEC_OPTIONS, maxBuffer: 1024 * 1024 }, (error, stdout) => {
-      if (error) {
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ ok: false, error: error.message, output: '' }))
-        return
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, output: stdout }))
-    })
-    return
-  }
-
-  // Cancel - send Ctrl+C to tmux (legacy, for backwards compat)
+  // Cancel - send Ctrl+C to tmux (legacy fallback for default tmux session)
   if (req.method === 'POST' && req.url === '/cancel') {
     try {
       validateTmuxSession(TMUX_SESSION)
@@ -1765,13 +1725,6 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse) {
   // ============================================================================
   // Session Management Endpoints
   // ============================================================================
-
-  // Get server info (cwd, etc.)
-  if (req.method === 'GET' && req.url === '/info') {
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, cwd: process.cwd() }))
-    return
-  }
 
   // List all sessions
   if (req.method === 'GET' && req.url === '/sessions') {
@@ -1813,20 +1766,46 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse) {
   // Projects API (known directories for autocomplete)
   // ============================================================================
 
-  // List all known projects
-  if (req.method === 'GET' && req.url === '/projects') {
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, projects: projectsManager.getProjects() }))
-    return
-  }
-
-  // Autocomplete path
+  // Autocomplete path (includes sessions + known projects)
   if (req.method === 'GET' && req.url?.startsWith('/projects/autocomplete')) {
     const url = new URL(req.url, `http://localhost:${PORT}`)
     const query = url.searchParams.get('q') || ''
-    const results = projectsManager.autocomplete(query)
+    const lowerQuery = query.toLowerCase()
+
+    // Collect active session directories (tagged as session type)
+    const sessionItems: Array<{ path: string; name: string; type: 'session'; status: string }> = []
+    const sessionPaths = new Set<string>()
+    for (const session of managedSessions.values()) {
+      if (session.cwd && (
+        !query ||
+        session.name.toLowerCase().includes(lowerQuery) ||
+        session.cwd.toLowerCase().includes(lowerQuery)
+      )) {
+        sessionItems.push({
+          path: session.cwd,
+          name: session.name,
+          type: 'session',
+          status: session.status,
+        })
+        sessionPaths.add(session.cwd)
+      }
+    }
+
+    // Get project results, excluding paths already covered by sessions
+    const richResults = projectsManager.autocompleteRich(query)
+    const projectItems = richResults
+      .filter(r => !sessionPaths.has(r.path))
+      .map(r => ({ ...r, type: 'project' as const }))
+
+    // Sessions first, then projects
+    const allItems = [...sessionItems, ...projectItems]
+
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, results }))
+    res.end(JSON.stringify({
+      ok: true,
+      results: allItems.map(r => r.path),
+      items: allItems,
+    }))
     return
   }
 

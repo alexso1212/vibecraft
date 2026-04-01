@@ -18,6 +18,7 @@ export default defineConfig({
   },
   server: {
     port: clientPort,
+    host: true,
     proxy: {
       '/ws': {
         target: `ws://localhost:${serverPort}`,

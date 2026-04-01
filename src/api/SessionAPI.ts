@@ -57,12 +57,13 @@ export function createSessionAPI(apiUrl: string) {
     },
 
     /**
-     * Fetch server info (cwd, etc.)
+     * Fetch server info (cwd, etc.) from /config endpoint
      */
     async getServerInfo(): Promise<ServerInfoResponse> {
       try {
-        const response = await fetch(`${apiUrl}/info`)
-        return await response.json()
+        const response = await fetch(`${apiUrl}/config`)
+        const data = await response.json()
+        return { ok: true, cwd: data.cwd }
       } catch (e) {
         console.error('Error fetching server info:', e)
         return { ok: false, error: 'Network error' }

@@ -6,6 +6,7 @@
  */
 
 import * as pty from 'node-pty'
+import { execSync } from 'child_process'
 import type { WebSocket } from 'ws'
 
 interface TerminalSession {
@@ -26,7 +27,12 @@ export class TerminalBridge {
     if (session) {
       // PTY already running, just add this client
       session.clients.add(ws)
+      // Send scrollback history to new client
+      this.sendScrollback(managedSessionId, tmuxSession, ws)
     } else {
+      // Send scrollback history before live PTY stream
+      this.sendScrollback(managedSessionId, tmuxSession, ws)
+
       // Spawn new PTY attached to tmux
       const ptyProcess = pty.spawn('tmux', ['attach-session', '-t', tmuxSession], {
         name: 'xterm-256color',
@@ -73,6 +79,28 @@ export class TerminalBridge {
     ws.on('close', () => {
       this.detachClient(managedSessionId, ws)
     })
+  }
+
+  /**
+   * Capture tmux scrollback and send to client as initial content
+   */
+  private sendScrollback(managedSessionId: string, tmuxSession: string, ws: WebSocket): void {
+    try {
+      const history = execSync(
+        `tmux capture-pane -p -S -2000 -t ${JSON.stringify(tmuxSession)}`,
+        { encoding: 'utf8', timeout: 3000 },
+      )
+      if (history && ws.readyState === 1) {
+        // Send as terminal_output so xterm.js captures it in scrollback
+        ws.send(JSON.stringify({
+          type: 'terminal_output',
+          sessionId: managedSessionId,
+          data: history.replace(/\n/g, '\r\n'),
+        }))
+      }
+    } catch {
+      // Ignore - scrollback is a nice-to-have
+    }
   }
 
   /**

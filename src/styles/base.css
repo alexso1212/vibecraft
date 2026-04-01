@@ -21,10 +21,10 @@ body {
 
 /* Left panel: 3D Scene */
 #scene-panel {
-  width: 60%;
+  flex: 6;
+  min-width: 200px;
   height: 100%;
   position: relative;
-  border-right: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 #canvas-container {
@@ -32,9 +32,26 @@ body {
   height: 100%;
 }
 
+/* Resize handle between panels */
+#panel-resize-handle {
+  width: 5px;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.08);
+  cursor: col-resize;
+  flex-shrink: 0;
+  transition: background 0.15s;
+  position: relative;
+}
+
+#panel-resize-handle:hover,
+#panel-resize-handle.dragging {
+  background: rgba(88, 166, 255, 0.4);
+}
+
 /* Right panel: Activity Feed */
 #feed-panel {
-  width: 40%;
+  flex: 4;
+  min-width: 280px;
   height: 100%;
   display: flex;
   flex-direction: column;

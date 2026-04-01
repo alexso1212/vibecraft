@@ -91,7 +91,7 @@ export class ProjectsManager {
    * 2. Known projects (fuzzy match)
    * 3. Filesystem completion (partial path)
    */
-  autocomplete(partial: string, limit = 15): string[] {
+  autocomplete(partial: string, limit = 30): string[] {
     const results: string[] = []
     const seen = new Set<string>()
 
@@ -122,7 +122,7 @@ export class ProjectsManager {
     // 2. Add known projects (but deprioritize when browsing)
     const lowerPartial = partial.toLowerCase()
     const matchingProjects: string[] = []
-    for (const project of this.projects) {
+    for (const project of this.getProjects()) {
       if (
         project.path.toLowerCase().includes(lowerPartial) ||
         project.name.toLowerCase().includes(lowerPartial)
@@ -151,6 +151,20 @@ export class ProjectsManager {
     // (known projects stay sorted by recency from getProjects())
 
     return results.slice(0, limit)
+  }
+
+  /**
+   * Rich autocomplete with project names
+   * Returns objects with path and display name
+   */
+  autocompleteRich(partial: string, limit = 30): Array<{ path: string; name: string }> {
+    const paths = this.autocomplete(partial, limit)
+    const projectMap = new Map(this.projects.map(p => [p.path, p.name]))
+
+    return paths.map(path => ({
+      path,
+      name: projectMap.get(path) || basename(path),
+    }))
   }
 
   /**
