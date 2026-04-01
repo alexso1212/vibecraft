@@ -60,6 +60,7 @@ import { checkForUpdates } from './ui/VersionChecker'
 import { drawMode } from './ui/DrawMode'
 import { setupTextLabelModal, showTextLabelModal } from './ui/TextLabelModal'
 import { createSessionAPI, type SessionAPI } from './api'
+import { TerminalView } from './ui/TerminalView'
 
 // ============================================================================
 // Configuration
@@ -132,6 +133,7 @@ interface AppState {
   promptHistory: string[]  // History of sent prompts for up/down navigation
   historyIndex: number  // Current position in history (-1 = not navigating)
   historyDraft: string  // Saved draft when navigating history
+  terminalView: TerminalView | null  // xterm.js terminal view
 }
 
 const state: AppState = {
@@ -154,6 +156,7 @@ const state: AppState = {
   promptHistory: [],
   historyIndex: -1,
   historyDraft: '',
+  terminalView: null,
 }
 
 // Expose for console testing (can remove in production)
@@ -342,8 +345,26 @@ function selectManagedSession(sessionId: string | null): void {
       state.scene.focusZone(session.claudeSessionId)
       focusSession(session.claudeSessionId)
     }
+
+    // Auto-show terminal and attach to this session
+    if (state.terminalView) {
+      state.terminalView.show()
+      state.terminalView.attach(sessionId)
+      // Sync tab UI
+      document.querySelectorAll<HTMLButtonElement>('.feed-tab').forEach(t =>
+        t.classList.toggle('active', t.dataset.tab === 'terminal')
+      )
+    }
   } else {
     state.feedManager?.setFilter(null)  // Show all sessions
+
+    // Switch back to feed when viewing all sessions
+    if (state.terminalView?.isVisible()) {
+      state.terminalView.hide()
+      document.querySelectorAll<HTMLButtonElement>('.feed-tab').forEach(t =>
+        t.classList.toggle('active', t.dataset.tab === 'feed')
+      )
+    }
 
     // Switch to overview mode showing all zones
     if (state.scene) {
@@ -1343,7 +1364,7 @@ function setupDevPanel(): void {
 /** Map Claude sessionIds to managed session IDs */
 const claudeToManagedLink = new Map<string, string>()
 
-function getOrCreateSession(sessionId: string): SessionState | null {
+function getOrCreateSession(sessionId: string, eventCwd?: string): SessionState | null {
   let session = state.sessions.get(sessionId)
   if (session) return session
 
@@ -1353,7 +1374,7 @@ function getOrCreateSession(sessionId: string): SessionState | null {
 
   // Check if this session can be linked to a managed session
   // Only create zones for sessions that are linked or can be linked
-  const canLink = canLinkToManagedSession(sessionId)
+  const canLink = canLinkToManagedSession(sessionId, eventCwd)
   if (!canLink) {
     // Unlinked session - don't create a zone for it
     console.log(`Ignoring unlinked session ${sessionId.slice(0, 8)} (no matching managed session)`)
@@ -1362,7 +1383,7 @@ function getOrCreateSession(sessionId: string): SessionState | null {
 
   // Try to link to a recently-created managed session FIRST
   // (so we can get the hint position from it)
-  const linkedManagedSession = tryLinkToManagedSession(sessionId)
+  const linkedManagedSession = tryLinkToManagedSession(sessionId, eventCwd)
 
   // Look up hint position: first check saved zone position, then pending hints
   let hintPosition: { x: number; z: number } | undefined
@@ -1462,9 +1483,9 @@ function getOrCreateSession(sessionId: string): SessionState | null {
 
 /**
  * Check if a Claude session can be linked to a managed session
- * Returns true if already linked or if there's a recently-created unlinked managed session
+ * Returns true if already linked, cwd matches, or there's a recently-created unlinked managed session
  */
-function canLinkToManagedSession(claudeSessionId: string): boolean {
+function canLinkToManagedSession(claudeSessionId: string, eventCwd?: string): boolean {
   // Already linked?
   if (claudeToManagedLink.has(claudeSessionId)) {
     return true
@@ -1477,7 +1498,19 @@ function canLinkToManagedSession(claudeSessionId: string): boolean {
     }
   }
 
-  // Is there a recently-created unlinked managed session we can link to?
+  // Can we match by working directory? (precise, no timing dependency)
+  if (eventCwd) {
+    const normalizedCwd = eventCwd.replace(/\/+$/, '')
+    for (const managed of state.managedSessions) {
+      if (!managed.claudeSessionId && managed.cwd) {
+        if (managed.cwd.replace(/\/+$/, '') === normalizedCwd) {
+          return true
+        }
+      }
+    }
+  }
+
+  // Fallback: is there a recently-created unlinked managed session?
   const now = Date.now()
   const LINK_WINDOW_MS = 30_000 // 30 seconds
   for (const managed of state.managedSessions) {
@@ -1494,33 +1527,41 @@ function canLinkToManagedSession(claudeSessionId: string): boolean {
 
 /**
  * Try to link a Claude session to a managed session
- * Uses timing: looks for unlinked managed sessions created in the last 30 seconds
+ * Priority: 1) already linked  2) cwd match  3) timing-based fallback
  */
-function tryLinkToManagedSession(claudeSessionId: string): ManagedSession | null {
-  const now = Date.now()
-  const LINK_WINDOW_MS = 30_000 // 30 seconds
-
+function tryLinkToManagedSession(claudeSessionId: string, eventCwd?: string): ManagedSession | null {
   // Check if already linked
   if (claudeToManagedLink.has(claudeSessionId)) {
     const managedId = claudeToManagedLink.get(claudeSessionId)!
     return state.managedSessions.find(s => s.id === managedId) || null
   }
 
-  // Find unlinked managed sessions created recently
-  for (const managed of state.managedSessions) {
-    // Skip if already linked
-    if (managed.claudeSessionId) continue
+  // Priority 1: Match by working directory (precise)
+  if (eventCwd) {
+    const normalizedCwd = eventCwd.replace(/\/+$/, '')
+    for (const managed of state.managedSessions) {
+      if (managed.claudeSessionId) continue
+      if (managed.cwd && managed.cwd.replace(/\/+$/, '') === normalizedCwd) {
+        claudeToManagedLink.set(claudeSessionId, managed.id)
+        managed.claudeSessionId = claudeSessionId
+        linkSessionOnServer(managed.id, claudeSessionId)
+        console.log(`Linked session ${claudeSessionId.slice(0, 8)} to "${managed.name}" by cwd match: ${eventCwd}`)
+        return managed
+      }
+    }
+  }
 
-    // Check if created recently
+  // Priority 2: Timing-based fallback (only if cwd matching failed)
+  const now = Date.now()
+  const LINK_WINDOW_MS = 30_000 // 30 seconds
+  for (const managed of state.managedSessions) {
+    if (managed.claudeSessionId) continue
     const age = now - managed.createdAt
     if (age < LINK_WINDOW_MS) {
-      // Link them!
       claudeToManagedLink.set(claudeSessionId, managed.id)
       managed.claudeSessionId = claudeSessionId
-
-      // Notify server about the link
       linkSessionOnServer(managed.id, claudeSessionId)
-
+      console.log(`Linked session ${claudeSessionId.slice(0, 8)} to "${managed.name}" by timing fallback`)
       return managed
     }
   }
@@ -1748,7 +1789,7 @@ function updateStats() {
 function handleEvent(event: ClaudeEvent) {
   // Get or create session for this event
   // Returns null if the session isn't linked to a managed session
-  const session = getOrCreateSession(event.sessionId)
+  const session = getOrCreateSession(event.sessionId, event.cwd)
 
   state.eventHistory.push(event)
 
@@ -2175,57 +2216,42 @@ function setupPromptForm() {
 }
 
 // ============================================================================
-// Terminal Output Panel
+// Terminal View (xterm.js)
 // ============================================================================
 
-const TMUX_URL = `${API_URL}/tmux-output`
+function setupTerminalView(): void {
+  const containerEl = document.getElementById('terminal-panel')
+  const feedWrapperEl = document.getElementById('activity-feed-wrapper')
+  if (!containerEl || !feedWrapperEl || !state.client) return
 
-let terminalPollInterval: number | null = null
+  state.terminalView = new TerminalView(
+    containerEl,
+    feedWrapperEl,
+    (msg) => state.client?.sendRaw(msg),
+  )
+
+  // Tab switcher
+  const tabs = document.querySelectorAll<HTMLButtonElement>('.feed-tab')
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      const target = tab.dataset.tab
+      tabs.forEach(t => t.classList.toggle('active', t === tab))
+
+      if (target === 'terminal') {
+        state.terminalView?.show()
+        // Auto-attach to selected session
+        if (state.selectedManagedSession) {
+          state.terminalView?.attach(state.selectedManagedSession)
+        }
+      } else {
+        state.terminalView?.hide()
+      }
+    })
+  })
+}
 
 function setupTerminalToggle() {
-  const toggle = document.getElementById('terminal-toggle')
-  const panel = document.getElementById('terminal-panel')
-  const output = document.getElementById('terminal-output')
-
-  if (!toggle || !panel || !output) return
-
-  toggle.addEventListener('click', () => {
-    const isHidden = panel.classList.toggle('hidden')
-    toggle.classList.toggle('active', !isHidden)
-
-    if (!isHidden) {
-      // Start polling when visible
-      fetchTerminalOutput()
-      terminalPollInterval = window.setInterval(fetchTerminalOutput, 2000)
-    } else {
-      // Stop polling when hidden
-      if (terminalPollInterval) {
-        clearInterval(terminalPollInterval)
-        terminalPollInterval = null
-      }
-    }
-  })
-
-  async function fetchTerminalOutput() {
-    if (!output || !panel) return
-    try {
-      const response = await fetch(TMUX_URL)
-      const data = await response.json()
-      if (data.ok && data.output) {
-        // Strip ANSI codes and clean up
-        const cleaned = data.output
-          .replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '') // Remove ANSI codes
-          .replace(/\r/g, '') // Remove carriage returns
-        output.textContent = cleaned
-        // Auto-scroll to bottom
-        panel.scrollTop = panel.scrollHeight
-      } else if (data.error) {
-        output.textContent = `Error: ${data.error}`
-      }
-    } catch (e) {
-      output.textContent = 'Failed to connect to server'
-    }
-  }
+  // Now handled by setupTerminalView() after client is ready
 }
 
 // ============================================================================
@@ -2859,6 +2885,9 @@ function init() {
       if (state.scene) {
         state.scene.setTextTiles(tiles)
       }
+    } else if (message.type === 'terminal_output' || message.type === 'terminal_exit') {
+      // Route terminal messages to TerminalView
+      state.terminalView?.handleMessage(message as { type: string; sessionId?: string; data?: string; exitCode?: number })
     }
   })
 
@@ -2867,8 +2896,11 @@ function init() {
   // Setup prompt form
   setupPromptForm()
 
-  // Setup terminal toggle
+  // Setup terminal toggle (legacy stub)
   setupTerminalToggle()
+
+  // Setup xterm.js terminal view (needs client)
+  setupTerminalView()
 
   // Setup managed sessions (orchestration)
   setupManagedSessions()

@@ -293,6 +293,13 @@ export class EventClient {
     }
   }
 
+  /** Send a raw message (for terminal, voice, etc.) */
+  sendRaw(message: Record<string, unknown>): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message))
+    }
+  }
+
   requestHistory(limit = 100): void {
     this.send({ type: 'get_history', payload: { limit } })
   }

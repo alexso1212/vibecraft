@@ -166,6 +166,8 @@ export type ServerMessage =
   | { type: 'permission_prompt'; payload: { sessionId: string; tool: string; context: string; options: PermissionOption[] } }
   | { type: 'permission_resolved'; payload: { sessionId: string } }
   | { type: 'text_tiles'; payload: TextTile[] }
+  | { type: 'terminal_output'; sessionId: string; data: string }
+  | { type: 'terminal_exit'; sessionId: string; exitCode: number }
 
 /** Client -> Server messages */
 export type ClientMessage =
@@ -175,6 +177,10 @@ export type ClientMessage =
   | { type: 'voice_start' }
   | { type: 'voice_stop' }
   | { type: 'permission_response'; payload: { sessionId: string; response: string } }
+  | { type: 'terminal_attach'; payload: { sessionId: string } }
+  | { type: 'terminal_detach'; payload: { sessionId: string } }
+  | { type: 'terminal_input'; payload: { sessionId: string; data: string } }
+  | { type: 'terminal_resize'; payload: { sessionId: string; cols: number; rows: number } }
 
 // ============================================================================
 // Visualization State

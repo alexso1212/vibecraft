@@ -37,6 +37,7 @@ import type {
 import { DEFAULTS } from '../shared/defaults.js'
 import { GitStatusManager } from './GitStatusManager.js'
 import { ProjectsManager } from './ProjectsManager.js'
+import { TerminalBridge } from './TerminalBridge.js'
 import { fileURLToPath } from 'url'
 
 // ============================================================================
@@ -77,6 +78,11 @@ function expandHome(path: string): string {
     return path.replace('~', process.env.HOME || '')
   }
   return path
+}
+
+/** Normalize a path for comparison: expand ~, resolve, strip trailing slash */
+function normalizePath(p: string): string {
+  return resolve(expandHome(p)).replace(/\/+$/, '')
 }
 
 const PORT = parseInt(process.env.VIBECRAFT_PORT ?? String(DEFAULTS.SERVER_PORT), 10)
@@ -306,6 +312,9 @@ const gitStatusManager = new GitStatusManager()
 
 /** Project directories manager */
 const projectsManager = new ProjectsManager()
+
+/** Terminal bridge for embedded xterm.js */
+const terminalBridge = new TerminalBridge()
 
 /** Active voice transcription sessions (WebSocket client → Deepgram connection) */
 const voiceSessions = new Map<WebSocket, LiveClient>()
@@ -1299,6 +1308,22 @@ function addEvent(event: ClaudeEvent) {
     events.splice(0, events.length - MAX_EVENTS)
   }
 
+  // Auto-link unlinked Claude sessions by matching cwd
+  if (!claudeToManagedMap.has(event.sessionId) && event.cwd) {
+    const normalizedCwd = normalizePath(event.cwd)
+    for (const [id, managed] of managedSessions) {
+      if (managed.claudeSessionId) continue
+      if (managed.cwd && normalizePath(managed.cwd) === normalizedCwd) {
+        debug(`Auto-linking Claude session ${event.sessionId.slice(0, 8)} to "${managed.name}" by cwd match: ${event.cwd}`)
+        linkClaudeSession(event.sessionId, id)
+        managed.claudeSessionId = event.sessionId
+        broadcastSessions()
+        saveSessions()
+        break
+      }
+    }
+  }
+
   // Update managed session status based on event
   const managedSession = findManagedSession(event.sessionId)
   if (managedSession) {
@@ -1460,6 +1485,39 @@ function handleClientMessage(ws: WebSocket, message: ClientMessage) {
     case 'permission_response': {
       const { sessionId, response } = message.payload
       sendPermissionResponse(sessionId, response)
+      break
+    }
+
+    case 'terminal_attach': {
+      const { sessionId } = message.payload
+      const session = getSession(sessionId)
+      if (session?.tmuxSession) {
+        try {
+          validateTmuxSession(session.tmuxSession)
+          terminalBridge.attach(sessionId, session.tmuxSession, ws)
+          log(`Terminal attached: ${session.name} -> tmux:${session.tmuxSession}`)
+        } catch {
+          ws.send(JSON.stringify({ type: 'terminal_exit', sessionId, exitCode: 1 }))
+        }
+      }
+      break
+    }
+
+    case 'terminal_detach': {
+      const { sessionId } = message.payload
+      terminalBridge.detachClient(sessionId, ws)
+      break
+    }
+
+    case 'terminal_input': {
+      const { sessionId, data } = message.payload
+      terminalBridge.write(sessionId, data)
+      break
+    }
+
+    case 'terminal_resize': {
+      const { sessionId, cols, rows } = message.payload
+      terminalBridge.resize(sessionId, cols, rows)
       break
     }
 
@@ -1986,6 +2044,41 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse) {
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ ok: true, session }))
         })
+      })
+      return
+    }
+
+    // POST /sessions/:id/terminal - Open Terminal.app attached to tmux session
+    if (req.method === 'POST' && action === 'terminal') {
+      const session = getSession(sessionId)
+      if (!session) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'Session not found' }))
+        return
+      }
+
+      try {
+        validateTmuxSession(session.tmuxSession)
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'Invalid tmux session name' }))
+        return
+      }
+
+      const script = `tell application "Terminal"
+  activate
+  do script "tmux attach -t ${session.tmuxSession}"
+end tell`
+
+      execFile('osascript', ['-e', script], EXEC_OPTIONS, (error) => {
+        if (error) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: `Failed to open terminal: ${error.message}` }))
+          return
+        }
+        log(`Opened terminal for session: ${session.name} -> tmux:${session.tmuxSession}`)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true }))
       })
       return
     }

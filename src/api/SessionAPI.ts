@@ -157,6 +157,21 @@ export function createSessionAPI(apiUrl: string) {
     },
 
     /**
+     * Open Terminal.app attached to the session's tmux
+     */
+    async openTerminal(sessionId: string): Promise<SimpleResponse> {
+      try {
+        const response = await fetch(`${apiUrl}/sessions/${sessionId}/terminal`, {
+          method: 'POST',
+        })
+        return await response.json()
+      } catch (e) {
+        console.error('Error opening terminal:', e)
+        return { ok: false, error: 'Network error' }
+      }
+    },
+
+    /**
      * Link a Claude session ID to a managed session
      */
     async linkSession(
