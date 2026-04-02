@@ -210,10 +210,27 @@ async function step1_textTo3D(apiKey: string, prompt: string): Promise<string> {
   return refineId
 }
 
-async function step2_rig(apiKey: string, textTo3dTaskId: string): Promise<string> {
-  log('Step 2/4: 骨骼绑定 (rigging)...')
-  const result = (await meshyRequest(apiKey, 'POST', '/openapi/v1/rigging', {
+async function step1b_remesh(apiKey: string, textTo3dTaskId: string): Promise<string> {
+  log('Step 1c/5: 减面 (remesh to <300k faces)...')
+  const result = (await meshyRequest(apiKey, 'POST', '/openapi/v1/remesh', {
     input_task_id: textTo3dTaskId,
+    target_polycount: 50000,
+    topology: 'quad',
+  })) as { result: string }
+
+  const taskId = result.result
+  log(`  Remesh task: ${taskId}`)
+
+  const remeshed = await pollUntilDone(apiKey, `/openapi/v1/remesh/${taskId}`, 'Remesh')
+  log('  ✓ Remesh 完成')
+
+  return taskId
+}
+
+async function step2_rig(apiKey: string, inputTaskId: string): Promise<string> {
+  log('Step 2/5: 骨骼绑定 (rigging)...')
+  const result = (await meshyRequest(apiKey, 'POST', '/openapi/v1/rigging', {
+    input_task_id: inputTaskId,
     height_meters: 1.7,
   })) as { result: string }
 
@@ -248,10 +265,11 @@ async function step4_download(apiKey: string, animTaskId: string, outputName: st
   log('Step 4/4: 下载 GLB...')
 
   const result = (await meshyRequest(apiKey, 'GET', `/openapi/v1/animations/${animTaskId}`)) as {
+    result?: { animation_glb_url?: string }
     animation_glb_url?: string
   }
 
-  const glbUrl = result.animation_glb_url
+  const glbUrl = result.result?.animation_glb_url || result.animation_glb_url
   if (!glbUrl) throw new Error('No GLB URL in animation result')
 
   mkdirSync(OUTPUT_DIR, { recursive: true })
@@ -305,7 +323,8 @@ async function main(): Promise<void> {
       process.exit(1)
     }
     const apiKey = loadApiKey()
-    const rigId = await step2_rig(apiKey, t2dTaskId)
+    const remeshId = await step1b_remesh(apiKey, t2dTaskId)
+    const rigId = await step2_rig(apiKey, remeshId)
     const animId = await step3_animate(apiKey, rigId, actionId)
     await step4_download(apiKey, animId, `animated_${actionId}`)
     return
@@ -349,8 +368,11 @@ Usage:
   // Step 1: Text → 3D Model
   const refineTaskId = await step1_textTo3D(apiKey, description)
 
+  // Step 1c: Remesh (reduce face count for rigging)
+  const remeshTaskId = await step1b_remesh(apiKey, refineTaskId)
+
   // Step 2: Rig
-  const rigTaskId = await step2_rig(apiKey, refineTaskId)
+  const rigTaskId = await step2_rig(apiKey, remeshTaskId)
 
   // Step 3: Animate
   const animTaskId = await step3_animate(apiKey, rigTaskId, actionId)
@@ -366,6 +388,7 @@ Usage:
   log('')
   log(`📋 任务ID (可复用):`)
   log(`   Text-to-3D (refine): ${refineTaskId}`)
+  log(`   Remesh: ${remeshTaskId}`)
   log(`   Rigging: ${rigTaskId}`)
   log(`   Animation: ${animTaskId}`)
 }
