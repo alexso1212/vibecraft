@@ -3273,4 +3273,11 @@ window.addEventListener('load', init)
 window.addEventListener('beforeunload', cleanup)
 
 // Export for debugging
-;(window as unknown as { vibecraft: AppState }).vibecraft = state
+;(window as unknown as { vibecraft: AppState; claude: unknown }).vibecraft = state
+// Expose focused session's claude for console use (e.g. claude.loadAnimation('/models/animated_22.glb'))
+Object.defineProperty(window, 'claude', {
+  get: () => {
+    if (!state.focusedSessionId) return null
+    return state.sessions.get(state.focusedSessionId)?.claude ?? null
+  },
+})
