@@ -71,6 +71,12 @@ export class Claude implements ICharacter {
   private bones: Map<string, THREE.Bone> = new Map()
   private modelLoaded = false
 
+  // AnimationMixer for pre-baked GLB animations
+  private mixer: THREE.AnimationMixer | null = null
+  private clips: THREE.AnimationClip[] = []
+  private currentAction: THREE.AnimationAction | null = null
+  private useBakedAnimation = false
+
   // Proxy parts for the animation system (ClaudeMon compatibility)
   private headGroup: THREE.Group
   private leftEyeMesh: THREE.Mesh
@@ -386,8 +392,13 @@ export class Claude implements ICharacter {
       }
     }
 
+    // === AnimationMixer update (baked animations) ===
+    if (this.mixer) {
+      this.mixer.update(delta)
+    }
+
     // === Idle animation (Trump dance) ===
-    if (this.state === 'idle') {
+    if (this.state === 'idle' && !this.useBakedAnimation) {
       this.bobTime += delta * 2
 
       if (this.modelLoaded && this.bones.size > 0) {
@@ -396,7 +407,7 @@ export class Claude implements ICharacter {
     }
 
     // === Working animation ===
-    if (this.state === 'working') {
+    if (this.state === 'working' && !this.useBakedAnimation) {
       this.workTime += delta
 
       if (this.modelLoaded && this.bones.size > 0) {
@@ -418,7 +429,7 @@ export class Claude implements ICharacter {
     }
 
     // === Thinking animation ===
-    if (this.state === 'thinking') {
+    if (this.state === 'thinking' && !this.useBakedAnimation) {
       this.thinkTime += delta * 2
 
       if (this.modelLoaded && this.bones.size > 0) {
@@ -539,6 +550,87 @@ export class Claude implements ICharacter {
     this.rotateBone(BONE.hips, 0, 0, Math.sin(t * 0.3) * 0.02)
     this.rotateBone(BONE.leftUpLeg, 0.05, 0, 0)
     this.rotateBone(BONE.rightUpLeg, -0.05, 0, 0)
+  }
+
+  // ===== Baked Animation Support =====
+
+  /** Load a GLB with pre-baked animation and play it */
+  async loadAnimation(glbPath: string): Promise<void> {
+    const loader = new GLTFLoader()
+    try {
+      const gltf = await loader.loadAsync(glbPath)
+
+      if (gltf.animations.length === 0) {
+        console.warn(`[TrumpCharacter] No animations found in ${glbPath}`)
+        return
+      }
+
+      // If the GLB has its own model, replace current
+      if (gltf.scene.children.length > 0) {
+        // Remove old model children (keep status ring and thought bubbles)
+        const toRemove = this.mesh.children.filter(
+          (c) => c !== this.statusRing && c !== this.thoughtBubbles
+        )
+        toRemove.forEach((c) => this.mesh.remove(c))
+
+        const model = gltf.scene
+        const box = new THREE.Box3().setFromObject(model)
+        const height = box.max.y - box.min.y
+        const scale = 0.9 / height
+        model.scale.setScalar(scale)
+        box.setFromObject(model)
+        model.position.y = -box.min.y
+        model.position.x = -(box.max.x + box.min.x) / 2
+        model.position.z = -(box.max.z + box.min.z) / 2
+        model.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            child.castShadow = true
+            child.receiveShadow = true
+          }
+        })
+        this.mesh.add(model)
+
+        // Set up mixer on the new model
+        this.mixer = new THREE.AnimationMixer(model)
+      } else {
+        // Use mixer on existing mesh
+        this.mixer = new THREE.AnimationMixer(this.mesh)
+      }
+
+      this.clips = gltf.animations
+      this.useBakedAnimation = true
+
+      // Play first clip
+      this.playClip(0)
+
+      console.log(
+        `[TrumpCharacter] loaded animation: ${this.clips.length} clips from ${glbPath}`
+      )
+    } catch (err) {
+      console.error(`[TrumpCharacter] failed to load animation: ${glbPath}`, err)
+    }
+  }
+
+  /** Play a specific animation clip by index */
+  playClip(index: number): void {
+    if (!this.mixer || index >= this.clips.length) return
+    if (this.currentAction) {
+      this.currentAction.fadeOut(0.3)
+    }
+    const action = this.mixer.clipAction(this.clips[index])
+    action.reset().fadeIn(0.3).play()
+    this.currentAction = action
+  }
+
+  /** Stop baked animation and return to procedural */
+  stopBakedAnimation(): void {
+    if (this.currentAction) {
+      this.currentAction.fadeOut(0.3)
+      this.currentAction = null
+    }
+    this.useBakedAnimation = false
+    this.mixer = null
+    this.clips = []
   }
 
   // ===== Dev/Debug API (ClaudeMon compatibility) =====
