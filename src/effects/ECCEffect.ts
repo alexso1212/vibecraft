@@ -11,7 +11,7 @@
 
 import * as THREE from 'three'
 import type { WorkshopScene, Zone } from '../scene/WorkshopScene'
-import type { Claude } from '../entities/ClaudeMon'
+import type { ICharacter as Claude } from '../entities/ICharacter'
 
 // Clone positioning: triangle around the original, radius ~0.8
 const CLONE_COUNT = 3

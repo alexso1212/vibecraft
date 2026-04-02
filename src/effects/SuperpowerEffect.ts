@@ -11,7 +11,7 @@
 
 import * as THREE from 'three'
 import type { WorkshopScene, Zone } from '../scene/WorkshopScene'
-import type { Claude } from '../entities/ClaudeMon'
+import type { ICharacter as Claude } from '../entities/ICharacter'
 
 // Hair constants
 const HAIR_COLOR = 0xffd700     // Gold

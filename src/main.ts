@@ -10,7 +10,7 @@ import * as THREE from 'three'
 import { WorkshopScene, ZONE_COLORS, type Zone, type CameraMode } from './scene/WorkshopScene'
 // Character model - swap by changing the import:
 // import { Claude } from './entities/Claude'      // Original simple character
-import { Claude } from './entities/ClaudeMon'      // Robot buddy character
+import { Claude } from './entities/TrumpCharacter'  // Trump character
 import { SubagentManager } from './entities/SubagentManager'
 import { EventClient } from './events/EventClient'
 import { eventBus, type EventContext, type EventType } from './events/EventBus'

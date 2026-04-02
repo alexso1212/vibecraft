@@ -12,7 +12,7 @@
 
 import * as THREE from 'three'
 import type { WorkshopScene, Zone } from '../scene/WorkshopScene'
-import type { Claude } from '../entities/ClaudeMon'
+import type { ICharacter as Claude } from '../entities/ICharacter'
 import type { SubagentManager } from '../entities/SubagentManager'
 
 const COMMAND_ELEVATION = 1.5
